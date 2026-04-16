@@ -1,9 +1,8 @@
 #include <cassert>
-#include <cstring>
 
 #include "pointer_protocol.hpp"
 
-using namespace voicepointer;
+using namespace targetpointer;
 
 namespace {
 
@@ -28,15 +27,14 @@ void test_invalid_angle_payload() {
     assert(command.type == CommandType::Invalid);
 }
 
-void test_target_command() {
-    const Command command = parse_command_line("TARGET:cup");
-    assert(command.type == CommandType::Target);
-    assert(std::strcmp(command.target_name.data(), "cup") == 0);
-}
-
 void test_status_query() {
     const Command command = parse_command_line("STATUS?");
     assert(command.type == CommandType::StatusQuery);
+}
+
+void test_unknown_command_is_invalid() {
+    const Command command = parse_command_line("TRACK:person");
+    assert(command.type == CommandType::Invalid);
 }
 
 void test_safe_angle_range() {
@@ -54,8 +52,8 @@ int main() {
     test_center_command_with_whitespace();
     test_valid_angle_command();
     test_invalid_angle_payload();
-    test_target_command();
     test_status_query();
+    test_unknown_command_is_invalid();
     test_safe_angle_range();
     return 0;
 }

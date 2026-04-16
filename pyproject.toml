@@ -1,14 +1,12 @@
 [project]
-name = "voicepointer"
-version = "0.1.0"
-description = "Desktop voice-and-vision pointer project"
+name = "targetpointer"
+version = "0.2.0"
+description = "Fixed-camera person pointing demo with YOLO, serial control, Blue Pill, and SG90"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "opencv-python>=4.13.0.92",
     "platformio>=6.1.19",
-    "pyaudio>=0.2.14",
     "pyserial>=3.5",
-    "speechrecognition>=3.16.0",
     "ultralytics>=8.4.37",
 ]

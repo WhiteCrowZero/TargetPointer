@@ -15,12 +15,12 @@
 
 | Category | Part | Qty | Status | Notes |
 | --- | --- | --- | --- | --- |
-| Camera mount | 手机支架 | 1 | pending | 固定画面视角 |
+| Camera mount | 手机支架或 USB 摄像头支架 | 1 | pending | 固定机位 |
 | Actuator power | 稳定 5V 电源 | 1 | pending | 优先给 SG90 独立供电 |
 | Structure | 箭头固定件 / 舵机支架 | 1 set | pending | 降低抖动 |
 
 ## Excluded
 
-- 独立离线语音模块
-- 外设定位接收器
+- 与当前主线无关的额外输入前端
+- 旧定位接收器
 - 旧标签附件

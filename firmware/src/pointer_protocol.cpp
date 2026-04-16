@@ -5,7 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace voicepointer {
+namespace targetpointer {
 namespace {
 
 const char* trim_left(const char* text) {
@@ -24,16 +24,6 @@ void trim_right_in_place(char* text) {
         }
         text[--len] = '\0';
     }
-}
-
-bool copy_target_name(const char* source, Command& command) {
-    if (source == nullptr || *source == '\0') {
-        return false;
-    }
-
-    std::strncpy(command.target_name.data(), source, command.target_name.size() - 1);
-    command.target_name[command.target_name.size() - 1] = '\0';
-    return true;
 }
 
 bool parse_integer(const char* text, std::int16_t& out_value) {
@@ -109,14 +99,6 @@ Command parse_command_line(const char* line) {
         return command;
     }
 
-    if (prefix_length == 6 && std::strncmp(trimmed, "TARGET", 6) == 0) {
-        if (!copy_target_name(payload, command)) {
-            return command;
-        }
-        command.type = CommandType::Target;
-        return command;
-    }
-
     return command;
 }
 
@@ -134,4 +116,4 @@ std::int16_t clamp_angle(std::int16_t angle_deg, std::int16_t min_deg, std::int1
     return angle_deg;
 }
 
-}  // namespace voicepointer
+}  // namespace targetpointer

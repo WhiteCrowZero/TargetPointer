@@ -1,38 +1,60 @@
 # Scripts
 
-本目录保存上位机联调用脚本，默认面向 `Windows + Python`，并统一使用 `uv` 管理 Python 环境与依赖。
+本目录保存当前唯一上位机控制通路的脚本，默认围绕“视觉 + 串口 + 固件”工作。
 
-## Files
+## 模块职责
 
-- `pointer_serial_cli.py`
-  串口手动发令工具，用于 Day 1 和 Day 2 的舵机联调。
+- `pointer_serial.py`
+  串口通信、命令发送、响应读取、状态查询。
+- `pointer_host_logic.py`
+  目标水平偏移到控制量的映射、死区、平滑、丢失策略等纯逻辑。
 - `pointer_vision_app.py`
-  上位机最小闭环程序，负责摄像头读取、目标选择、YOLO 检测、角度计算和串口发令。
+  摄像头读取、YOLO 推理、目标选择、可视化、串口联动。
+- `pointer_serial_cli.py`
+  手动串口调试工具，用于固件联调和协议验证。
 
-## Quick Start
-
-同步依赖：
+## 安装
 
 ```bash
 uv sync
 ```
 
-手动发串口命令：
+当前脚本依赖只围绕：
+
+- `opencv-python`
+- `ultralytics`
+- `pyserial`
+
+不需要安装任何与当前主线无关的额外输入系统库。
+
+## 快速使用
+
+串口联调：
 
 ```bash
 uv run python scripts/pointer_serial_cli.py --port COM5 ping
-uv run python scripts/pointer_serial_cli.py --port COM5 angle 120
+uv run python scripts/pointer_serial_cli.py --port COM5 status
 uv run python scripts/pointer_serial_cli.py --port COM5 center
+uv run python scripts/pointer_serial_cli.py --port COM5 angle 120
 ```
 
-运行视觉闭环：
+启动视觉主线：
 
 ```bash
-uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --target cup --show
+uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --model yolov8n.pt --verbose
 ```
 
-若要尝试语音输入：
+## 交互约定
 
-```bash
-uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --input-mode speech --show
-```
+- 运行后默认打开实时画面窗口。
+- 空闲状态下会显示 YOLO 检测到的人物框。
+- 鼠标左键点击某个人物框可开始跟踪。
+- 按 `r` 可手动框选人物区域。
+- 按 `d` 可强制刷新一次 YOLO 检测。
+- 按 `c` 回中，按 `x` 停止，按 `q` 退出。
+
+## 调试说明
+
+- `pointer_serial_cli.py` 会校验固件返回，收到 `ERR:*` 或无响应时以非零状态退出。
+- `pointer_vision_app.py` 启动时会先读取固件启动日志，再发送 `CENTER`。
+- 目标连续丢失若干帧后，程序会按配置执行 `STOP` 或 `CENTER`，避免舵机持续乱动。

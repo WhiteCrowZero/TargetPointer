@@ -1,21 +1,21 @@
 # 文档导航
 
-`docs/` 目录保存“寻音指针”的需求、架构、协议和调试文档，全部以当前最终方案为准：手机摄像头接入上位机，上位机完成语音识别与 YOLO 检测，Blue Pill 负责舵机执行。
+`docs/` 目录只服务于当前单主线版本：固定摄像头视角下，由上位机完成 YOLO 人物检测、目标初始化、持续定位与串口控制，Blue Pill 负责执行 SG90 单轴水平指向。
 
 ## 推荐阅读顺序
 
-1. [项目概述.md](/home/wzw/projects/VoicePointer/docs/项目概述.md)：项目背景、目标场景和总体流程。
-2. [需求说明.md](/home/wzw/projects/VoicePointer/docs/需求说明.md)：功能需求、非功能需求和边界。
-3. [架构设计.md](/home/wzw/projects/VoicePointer/docs/架构设计.md)：系统分层、数据流和角度计算思路。
-4. [接口与协议.md](/home/wzw/projects/VoicePointer/docs/接口与协议.md)：上位机到 Blue Pill 的串口文本协议。
-5. [硬件规格.md](/home/wzw/projects/VoicePointer/docs/硬件规格.md)：当前硬件选型和供电约束。
-6. [硬件调试计划.md](/home/wzw/projects/VoicePointer/docs/硬件调试计划.md)：分阶段调试顺序。
-7. [硬件调试记录.md](/home/wzw/projects/VoicePointer/docs/硬件调试记录.md)：当前硬件盘点、已确认项与待验证项。
-8. [开发TODO.md](/home/wzw/projects/VoicePointer/docs/开发TODO.md)：两天内可执行的开发与验收步骤。
+1. [项目概述.md](项目概述.md)：项目定位、场景和唯一主线。
+2. [需求说明.md](需求说明.md)：当前版本的范围、边界和验收重点。
+3. [架构设计.md](架构设计.md)：上位机控制链路、YOLO 初始化和固件职责分层。
+4. [接口与协议.md](接口与协议.md)：方向控制与状态查询协议。
+5. [硬件规格.md](硬件规格.md)：固定摄像头、Blue Pill、SG90 与供电约束。
+6. [硬件调试计划.md](硬件调试计划.md)：实机调试顺序。
+7. [硬件调试记录.md](硬件调试记录.md)：当前硬件盘点与实测记录模板。
+8. [开发TODO.md](开发TODO.md)：按演示优先级推进的分日任务。
 
 ## 维护约定
 
-- 文档统一使用“寻音指针”作为项目名称。
-- 旧的独立外设识别与定位方案已废弃，不再作为设计依据。
-- 变更主控、供电、串口参数或舵机角度边界时，先更新 [硬件规格.md](/home/wzw/projects/VoicePointer/docs/硬件规格.md)。
-- 调试结论先记入 [硬件调试记录.md](/home/wzw/projects/VoicePointer/docs/硬件调试记录.md)，稳定后再同步到正式文档。
+- 文档统一描述为“固定摄像头下的实体人物指向系统”。
+- 当前系统只关注单目标人物，不保留旧的类别物体指向叙事。
+- 目标识别逻辑全部在上位机，固件不做识别判断。
+- 变更硬件边界、串口协议或视觉主线时，先更新这里的文档再改代码。
