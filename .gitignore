@@ -1,0 +1,45 @@
+.DS_Store
+Thumbs.db
+
+.codex
+
+.vscode/
+.idea/
+
+*.log
+*.tmp
+
+firmware/.pio/
+firmware/.vscode/
+
+build/
+dist/
+__pycache__/
+*.pyc
+
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Build / packaging
+*.egg-info/
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+
+# Logs
+logs/
+
+
+# PlatformIO
+.pio/
+
+# Local config
+.env
+.env.*
