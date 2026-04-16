@@ -111,6 +111,20 @@ uv run python scripts/pointer_serial_cli.py --port COM5 angle 120
 uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --model yolov8n.pt --verbose
 ```
 
+启动桌面上位机：
+
+```bash
+uv run python scripts/pointer_desktop_app.py --model yolov8n.pt
+```
+
+如果已经明确摄像头与串口，推荐直接带参数启动：
+
+```bash
+uv run python scripts/pointer_desktop_app.py --port COM4 --camera 2 --camera-backend msmf --model yolov8n.pt
+```
+
+桌面上位机当前采用单窗口布局：左侧是实时视频舞台，右侧是连接与控制面板，活动日志默认隐藏，通过 `Activity` 弹层查看，不占主界面。
+
 运行测试：
 
 ```bash
