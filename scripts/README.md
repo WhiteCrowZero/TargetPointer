@@ -44,6 +44,18 @@ uv run python scripts/pointer_serial_cli.py --port COM5 angle 120
 uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --model yolov8n.pt --verbose
 ```
 
+Windows 下如果默认摄像头打开失败，可先扫描可用索引：
+
+```bash
+uv run python scripts/pointer_vision_app.py --list-cameras
+```
+
+也可以显式指定 backend：
+
+```bash
+uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --camera-backend msmf --model yolov8n.pt --verbose
+```
+
 ## 交互约定
 
 - 运行后默认打开实时画面窗口。
@@ -56,5 +68,7 @@ uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --model yolov
 ## 调试说明
 
 - `pointer_serial_cli.py` 会校验固件返回，收到 `ERR:*` 或无响应时以非零状态退出。
+- `pointer_serial_cli.py` 的 `status` 子命令会先发 `STATUS?`，旧固件若返回 `ERR:BAD_CMD` 会自动回退到 `STATUS`。
 - `pointer_vision_app.py` 启动时会先读取固件启动日志，再发送 `CENTER`。
+- Windows 下 `pointer_vision_app.py` 默认会依次尝试 `msmf`、`dshow`、`any` 三种摄像头 backend。
 - 目标连续丢失若干帧后，程序会按配置执行 `STOP` 或 `CENTER`，避免舵机持续乱动。

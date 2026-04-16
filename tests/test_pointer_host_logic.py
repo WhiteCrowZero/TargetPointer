@@ -5,10 +5,73 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from pointer_host_logic import apply_deadzone, map_center_to_angle, should_send_angle, should_stop_for_loss, smooth_angle
+from pointer_host_logic import (
+    apply_deadzone,
+    bbox_iou,
+    center_distance_ratio,
+    map_center_to_angle,
+    match_target_bbox,
+    should_send_angle,
+    should_stop_for_loss,
+    smooth_angle,
+    smooth_center,
+)
 
 
 class PointerHostLogicTests(unittest.TestCase):
+    def test_bbox_iou_reports_overlap(self) -> None:
+        self.assertAlmostEqual(bbox_iou((10, 10, 20, 20), (20, 20, 20, 20)), 1 / 7)
+
+    def test_center_distance_ratio_grows_with_farther_targets(self) -> None:
+        near_ratio = center_distance_ratio((100, 100, 50, 100), (110, 105, 50, 100))
+        far_ratio = center_distance_ratio((100, 100, 50, 100), (220, 100, 50, 100))
+        self.assertLess(near_ratio, far_ratio)
+
+    def test_match_target_bbox_selects_closest_valid_candidate(self) -> None:
+        previous_bbox = (100, 100, 50, 100)
+        candidates = [
+            (105, 102, 50, 100),
+            (220, 100, 50, 100),
+        ]
+        match = match_target_bbox(
+            previous_bbox,
+            candidates,
+            min_iou=0.0,
+            max_center_ratio=2.0,
+            max_area_change=1.0,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.index, 0)
+
+    def test_match_target_bbox_rejects_large_area_change(self) -> None:
+        previous_bbox = (100, 100, 50, 100)
+        candidates = [(105, 102, 120, 240)]
+        match = match_target_bbox(
+            previous_bbox,
+            candidates,
+            min_iou=0.0,
+            max_center_ratio=2.0,
+            max_area_change=0.5,
+        )
+        self.assertIsNone(match)
+
+    def test_match_target_bbox_rejects_low_iou_when_required(self) -> None:
+        previous_bbox = (100, 100, 50, 100)
+        candidates = [(160, 100, 50, 100)]
+        match = match_target_bbox(
+            previous_bbox,
+            candidates,
+            min_iou=0.2,
+            max_center_ratio=2.0,
+            max_area_change=1.0,
+        )
+        self.assertIsNone(match)
+
+    def test_smooth_center_interpolates_coordinates(self) -> None:
+        center = smooth_center((100.0, 80.0), (140.0, 120.0), 0.25)
+        self.assertEqual(center, (110.0, 90.0))
+
     def test_map_center_to_angle_maps_left_center_right(self) -> None:
         self.assertEqual(map_center_to_angle(0, 640, 20, 90, 160), 20)
         self.assertEqual(map_center_to_angle(320, 640, 20, 90, 160), 90)

@@ -1,3 +1,139 @@
+from dataclasses import dataclass
+
+
+BBox = tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class MatchResult:
+    index: int
+    score: float
+    iou: float
+    center_ratio: float
+    area_change: float
+
+
+def bbox_center(bbox: BBox) -> tuple[float, float]:
+    x, y, width, height = bbox
+    return x + width / 2.0, y + height / 2.0
+
+
+def bbox_area(bbox: BBox) -> int:
+    _, _, width, height = bbox
+    return max(0, width) * max(0, height)
+
+
+def bbox_diagonal(bbox: BBox) -> float:
+    _, _, width, height = bbox
+    return max(1.0, (width * width + height * height) ** 0.5)
+
+
+def bbox_iou(first_bbox: BBox, second_bbox: BBox) -> float:
+    first_x, first_y, first_width, first_height = first_bbox
+    second_x, second_y, second_width, second_height = second_bbox
+
+    first_right = first_x + first_width
+    first_bottom = first_y + first_height
+    second_right = second_x + second_width
+    second_bottom = second_y + second_height
+
+    inter_left = max(first_x, second_x)
+    inter_top = max(first_y, second_y)
+    inter_right = min(first_right, second_right)
+    inter_bottom = min(first_bottom, second_bottom)
+
+    inter_width = max(0, inter_right - inter_left)
+    inter_height = max(0, inter_bottom - inter_top)
+    intersection = inter_width * inter_height
+    if intersection == 0:
+        return 0.0
+
+    union = bbox_area(first_bbox) + bbox_area(second_bbox) - intersection
+    if union <= 0:
+        return 0.0
+    return intersection / union
+
+
+def center_distance_ratio(previous_bbox: BBox, candidate_bbox: BBox) -> float:
+    previous_center_x, previous_center_y = bbox_center(previous_bbox)
+    candidate_center_x, candidate_center_y = bbox_center(candidate_bbox)
+    delta_x = candidate_center_x - previous_center_x
+    delta_y = candidate_center_y - previous_center_y
+    distance = (delta_x * delta_x + delta_y * delta_y) ** 0.5
+    return distance / bbox_diagonal(previous_bbox)
+
+
+def area_change_ratio(previous_bbox: BBox, candidate_bbox: BBox) -> float:
+    previous_area = bbox_area(previous_bbox)
+    candidate_area = bbox_area(candidate_bbox)
+    if previous_area <= 0:
+        return 0.0
+    return abs(candidate_area - previous_area) / previous_area
+
+
+def match_target_bbox(
+    previous_bbox: BBox,
+    candidate_bboxes: list[BBox],
+    min_iou: float,
+    max_center_ratio: float,
+    max_area_change: float,
+) -> MatchResult | None:
+    if min_iou < 0:
+        raise ValueError("min_iou must be non-negative")
+    if max_center_ratio <= 0:
+        raise ValueError("max_center_ratio must be positive")
+    if max_area_change <= 0:
+        raise ValueError("max_area_change must be positive")
+
+    best_match: MatchResult | None = None
+
+    for index, candidate_bbox in enumerate(candidate_bboxes):
+        iou = bbox_iou(previous_bbox, candidate_bbox)
+        center_ratio = center_distance_ratio(previous_bbox, candidate_bbox)
+        area_change = area_change_ratio(previous_bbox, candidate_bbox)
+
+        if iou < min_iou:
+            continue
+        if center_ratio > max_center_ratio:
+            continue
+        if area_change > max_area_change:
+            continue
+
+        center_score = 1.0 - min(1.0, center_ratio / max_center_ratio)
+        area_score = 1.0 - min(1.0, area_change / max_area_change)
+        score = 0.55 * iou + 0.30 * center_score + 0.15 * area_score
+
+        match = MatchResult(
+            index=index,
+            score=score,
+            iou=iou,
+            center_ratio=center_ratio,
+            area_change=area_change,
+        )
+        if best_match is None or match.score > best_match.score:
+            best_match = match
+
+    return best_match
+
+
+def smooth_center(
+    last_center: tuple[float, float] | None,
+    next_center: tuple[float, float],
+    alpha: float,
+) -> tuple[float, float]:
+    if not 0 < alpha <= 1:
+        raise ValueError("alpha must be between 0 and 1")
+    if last_center is None:
+        return next_center
+
+    last_x, last_y = last_center
+    next_x, next_y = next_center
+    return (
+        last_x * (1.0 - alpha) + next_x * alpha,
+        last_y * (1.0 - alpha) + next_y * alpha,
+    )
+
+
 def map_center_to_angle(center_x: float, frame_width: int, min_angle: int, center_angle: int, max_angle: int) -> int:
     if frame_width <= 0:
         raise ValueError("frame_width must be positive")

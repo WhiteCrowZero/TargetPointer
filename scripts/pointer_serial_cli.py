@@ -23,6 +23,13 @@ def build_command(args: argparse.Namespace) -> str:
     raise ValueError(f"Unsupported command: {args.command}")
 
 
+def build_command_candidates(args: argparse.Namespace) -> list[str]:
+    command = build_command(args)
+    if args.command == "status":
+        return [command, "STATUS"]
+    return [command]
+
+
 def build_expected_responses(args: argparse.Namespace) -> list[str]:
     expected = list(args.expect)
     if args.command == "ping":
@@ -42,6 +49,33 @@ def validate_expected_responses(command: str, responses: list[str], expected: li
     for token in expected:
         if not any(token in line for line in responses):
             raise PointerSerialError(f"{command} -> missing expected response containing '{token}'")
+
+
+def send_with_fallback(
+    device: PointerSerialClient,
+    commands: list[str],
+    response_timeout: float,
+    idle_timeout: float,
+    require_response: bool,
+) -> tuple[str, list[str]]:
+    last_error: PointerSerialError | None = None
+
+    for index, command in enumerate(commands):
+        try:
+            responses = device.send(
+                command,
+                response_timeout=response_timeout,
+                idle_timeout=idle_timeout,
+                require_response=require_response,
+            )
+            return command, responses
+        except PointerSerialError as exc:
+            last_error = exc
+            is_last_candidate = index == len(commands) - 1
+            if is_last_candidate or "ERR:BAD_CMD" not in str(exc):
+                raise
+
+    raise last_error if last_error is not None else PointerSerialError("No command candidates were provided")
 
 
 def main() -> int:
@@ -71,7 +105,8 @@ def main() -> int:
     angle_parser.add_argument("angle", type=int, help="Servo angle in degrees.")
 
     args = parser.parse_args()
-    command = build_command(args)
+    primary_command = build_command(args)
+    command_candidates = build_command_candidates(args)
     expected_responses = build_expected_responses(args)
 
     try:
@@ -84,17 +119,19 @@ def main() -> int:
                         print(line)
 
             for attempt in range(1, args.repeat + 1):
-                responses = device.send(
-                    command,
+                used_command, responses = send_with_fallback(
+                    device,
+                    command_candidates,
                     response_timeout=args.response_timeout,
                     idle_timeout=args.idle_timeout,
                     require_response=not args.allow_no_response,
                 )
 
                 if expected_responses:
-                    validate_expected_responses(command, responses, expected_responses)
+                    validate_expected_responses(used_command, responses, expected_responses)
 
-                prefix = f">>> [{attempt}/{args.repeat}] {command}" if args.repeat > 1 else f">>> {command}"
+                command_label = primary_command if used_command == primary_command else f"{primary_command} (fallback {used_command})"
+                prefix = f">>> [{attempt}/{args.repeat}] {command_label}" if args.repeat > 1 else f">>> {command_label}"
                 print(prefix)
                 if responses:
                     for line in responses:

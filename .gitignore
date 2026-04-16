@@ -43,3 +43,5 @@ logs/
 # Local config
 .env
 .env.*
+
+yolo*

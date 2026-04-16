@@ -103,6 +103,8 @@ uv run python scripts/pointer_serial_cli.py --port COM5 center
 uv run python scripts/pointer_serial_cli.py --port COM5 angle 120
 ```
 
+`status` 子命令会优先发送 `STATUS?`，如果设备返回 `ERR:BAD_CMD`，会自动回退到旧协议 `STATUS`。
+
 启动上位机视觉主线：
 
 ```bash

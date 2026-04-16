@@ -76,7 +76,7 @@ Command parse_command_line(const char* line) {
         command.type = CommandType::Stop;
         return command;
     }
-    if (std::strcmp(trimmed, "STATUS?") == 0) {
+    if (std::strcmp(trimmed, "STATUS?") == 0 || std::strcmp(trimmed, "STATUS") == 0) {
         command.type = CommandType::StatusQuery;
         return command;
     }
