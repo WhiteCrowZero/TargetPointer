@@ -1,6 +1,6 @@
 [project]
 name = "targetpointer"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fixed-camera person pointing demo with YOLO, serial control, Blue Pill, and SG90"
 readme = "README.md"
 requires-python = ">=3.12"

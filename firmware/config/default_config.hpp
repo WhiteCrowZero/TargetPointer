@@ -11,6 +11,8 @@ inline constexpr uint8_t k_status_led_pin = PC13;
 inline constexpr int k_servo_min_angle_deg = 20;
 inline constexpr int k_servo_center_angle_deg = 90;
 inline constexpr int k_servo_max_angle_deg = 160;
+inline constexpr int k_servo_step_deg = 1;
+inline constexpr unsigned long k_servo_step_interval_ms = 24;
 
 inline constexpr unsigned long k_boot_delay_ms = 1200;
 inline constexpr size_t k_serial_line_buffer_size = 64;

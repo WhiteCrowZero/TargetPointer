@@ -99,6 +99,17 @@ Command parse_command_line(const char* line) {
         return command;
     }
 
+    if (prefix_length == 3 && std::strncmp(trimmed, "LED", 3) == 0) {
+        if (std::strcmp(payload, "ON") == 0) {
+            command.type = CommandType::LedOn;
+            return command;
+        }
+        if (std::strcmp(payload, "OFF") == 0) {
+            command.type = CommandType::LedOff;
+            return command;
+        }
+    }
+
     return command;
 }
 

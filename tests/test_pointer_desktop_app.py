@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from pointer_desktop_app import (
     build_history_point,
+    compute_plot_range,
     format_model_display_name,
     latest_non_none,
 )
@@ -41,6 +42,17 @@ class PointerDesktopAppTests(unittest.TestCase):
         self.assertEqual(point.detection_count, 2)
         self.assertEqual(point.missed_frames, 2)
         self.assertAlmostEqual(point.match_score, 0.87)
+
+    def test_compute_plot_range_prefers_fixed_bounds(self) -> None:
+        minimum, maximum = compute_plot_range([10, 20, 30], fixed_min=0, fixed_max=100)
+
+        self.assertEqual((minimum, maximum), (0, 100))
+
+    def test_compute_plot_range_expands_flat_series(self) -> None:
+        minimum, maximum = compute_plot_range([5, 5, 5])
+
+        self.assertLess(minimum, 5)
+        self.assertGreater(maximum, 5)
 
 
 if __name__ == "__main__":

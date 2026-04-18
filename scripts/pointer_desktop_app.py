@@ -98,6 +98,33 @@ def latest_non_none(values: list[int | float | None]) -> int | float | None:
     return None
 
 
+def compute_plot_range(
+    values: list[int | float | None],
+    *,
+    fixed_min: float | None = None,
+    fixed_max: float | None = None,
+) -> tuple[float, float]:
+    valid_values = [float(value) for value in values if value is not None]
+    minimum = fixed_min if fixed_min is not None else (min(valid_values) if valid_values else 0.0)
+    maximum = fixed_max if fixed_max is not None else (max(valid_values) if valid_values else 1.0)
+
+    if minimum == maximum:
+        if minimum == 0.0:
+            maximum = 1.0
+        else:
+            delta = abs(minimum) * 0.1 or 1.0
+            minimum -= delta
+            maximum += delta
+
+    return minimum, maximum
+
+
+def format_axis_value(value: float, precision: int = 0) -> str:
+    if precision > 0:
+        return f"{value:.{precision}f}"
+    return str(int(round(value)))
+
+
 def build_arrow_icon(
     glyph: str,
     *,
@@ -366,11 +393,26 @@ class ActivityDialog(QtWidgets.QDialog):
 
 
 class TrendPlot(QtWidgets.QWidget):
-    def __init__(self, color: str, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        color: str,
+        *,
+        y_label: str,
+        x_label: str = "t",
+        fixed_min: float | None = None,
+        fixed_max: float | None = None,
+        tick_precision: int = 0,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.color = QtGui.QColor(color)
         self.values: list[int | float | None] = []
-        self.setMinimumHeight(90)
+        self.y_label = y_label
+        self.x_label = x_label
+        self.fixed_min = fixed_min
+        self.fixed_max = fixed_max
+        self.tick_precision = tick_precision
+        self.setMinimumHeight(128)
 
     def set_values(self, values: list[int | float | None]) -> None:
         self.values = values
@@ -381,19 +423,59 @@ class TrendPlot(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
 
-        rect = self.rect().adjusted(4, 6, -4, -6)
-        painter.setPen(QtGui.QPen(QtGui.QColor("#ececf1"), 1))
-        for step in range(1, 3):
-            y = rect.top() + rect.height() * step / 3
-            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
-
         valid_points = [(index, value) for index, value in enumerate(self.values) if value is not None]
+        minimum, maximum = compute_plot_range(self.values, fixed_min=self.fixed_min, fixed_max=self.fixed_max)
+
+        left_margin = 38
+        right_margin = 16
+        top_margin = 14
+        bottom_margin = 24
+        plot_rect = self.rect().adjusted(left_margin, top_margin, -right_margin, -bottom_margin)
+        if plot_rect.width() <= 10 or plot_rect.height() <= 10:
+            return
+
+        axis_pen = QtGui.QPen(QtGui.QColor("#d9d9e1"), 1)
+        guide_pen = QtGui.QPen(QtGui.QColor("#efeff4"), 1)
+        text_pen = QtGui.QPen(QtGui.QColor("#86868f"))
+
+        painter.setPen(guide_pen)
+        painter.drawLine(plot_rect.topLeft(), plot_rect.topRight())
+        painter.drawLine(plot_rect.bottomLeft(), plot_rect.bottomRight())
+
+        painter.setPen(axis_pen)
+        painter.drawLine(plot_rect.bottomLeft(), plot_rect.bottomRight())
+        painter.drawLine(plot_rect.bottomLeft(), plot_rect.topLeft())
+
+        painter.setPen(text_pen)
+        tick_font = QtGui.QFont("Segoe UI", 9)
+        painter.setFont(tick_font)
+        max_label = format_axis_value(maximum, self.tick_precision)
+        min_label = format_axis_value(minimum, self.tick_precision)
+        painter.drawText(
+            QtCore.QRectF(0, plot_rect.top() - 10, left_margin - 8, 18),
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignTop,
+            max_label,
+        )
+        painter.drawText(
+            QtCore.QRectF(0, plot_rect.bottom() - 9, left_margin - 8, 18),
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignBottom,
+            min_label,
+        )
+        painter.drawText(
+            QtCore.QRectF(plot_rect.left() - 6, 0, 46, 18),
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
+            self.y_label,
+        )
+        painter.drawText(
+            QtCore.QRectF(plot_rect.right() - 10, plot_rect.bottom() + 4, 24, 16),
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter,
+            self.x_label,
+        )
+
         if len(valid_points) < 2:
             return
 
         numeric_values = [float(value) for _, value in valid_points]
-        minimum = min(numeric_values)
-        maximum = max(numeric_values)
         span = maximum - minimum
         if span < 1e-6:
             span = 1.0
@@ -401,13 +483,13 @@ class TrendPlot(QtWidgets.QWidget):
         last_index = max(1, len(self.values) - 1)
         path = QtGui.QPainterPath()
         first_index, first_value = valid_points[0]
-        first_x = rect.left() + rect.width() * first_index / last_index
-        first_y = rect.bottom() - rect.height() * ((float(first_value) - minimum) / span)
+        first_x = plot_rect.left() + plot_rect.width() * first_index / last_index
+        first_y = plot_rect.bottom() - plot_rect.height() * ((float(first_value) - minimum) / span)
         path.moveTo(first_x, first_y)
 
         for index, value in valid_points[1:]:
-            x = rect.left() + rect.width() * index / last_index
-            y = rect.bottom() - rect.height() * ((float(value) - minimum) / span)
+            x = plot_rect.left() + plot_rect.width() * index / last_index
+            y = plot_rect.bottom() - plot_rect.height() * ((float(value) - minimum) / span)
             path.lineTo(x, y)
 
         painter.setPen(QtGui.QPen(self.color, 2.2))
@@ -420,12 +502,30 @@ class TrendPlot(QtWidgets.QWidget):
 
 
 class TrendCard(QtWidgets.QFrame):
-    def __init__(self, title: str, color: str, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        color: str,
+        *,
+        y_label: str,
+        suffix: str = "",
+        fixed_min: float | None = None,
+        fixed_max: float | None = None,
+        precision: int = 0,
+        plot_tick_precision: int = 0,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("TrendCard")
+        self.precision = precision
+        self.suffix = suffix
+        range_min, range_max = compute_plot_range([], fixed_min=fixed_min, fixed_max=fixed_max)
+        self.axis_caption = (
+            f"{y_label} · {format_axis_value(range_min, plot_tick_precision)}–{format_axis_value(range_max, plot_tick_precision)} · x:t"
+        )
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
         heading_row = QtWidgets.QHBoxLayout()
         heading_row.setSpacing(10)
@@ -437,18 +537,28 @@ class TrendCard(QtWidgets.QFrame):
         heading_row.addStretch(1)
         heading_row.addWidget(self.value_label)
 
-        self.plot = TrendPlot(color)
+        self.axis_label = QtWidgets.QLabel(self.axis_caption)
+        self.axis_label.setObjectName("TrendAxisLabel")
+
+        self.plot = TrendPlot(
+            color,
+            y_label=y_label,
+            fixed_min=fixed_min,
+            fixed_max=fixed_max,
+            tick_precision=plot_tick_precision,
+        )
         layout.addLayout(heading_row)
+        layout.addWidget(self.axis_label)
         layout.addWidget(self.plot)
 
-    def set_series(self, values: list[int | float | None], precision: int = 0, suffix: str = "") -> None:
+    def set_series(self, values: list[int | float | None]) -> None:
         latest_value = latest_non_none(values)
         if latest_value is None:
             self.value_label.setText("—")
         elif isinstance(latest_value, float):
-            self.value_label.setText(f"{latest_value:.{precision}f}{suffix}")
+            self.value_label.setText(f"{latest_value:.{self.precision}f}{self.suffix}")
         else:
-            self.value_label.setText(f"{latest_value}{suffix}")
+            self.value_label.setText(f"{latest_value}{self.suffix}")
         self.plot.set_values(values)
 
 
@@ -517,10 +627,38 @@ class InsightsWindow(QtWidgets.QWidget):
         trends_grid.setHorizontalSpacing(14)
         trends_grid.setVerticalSpacing(14)
         self.trend_cards = {
-            "output_angle": TrendCard("Servo Output Trend", "#0071e3"),
-            "target_angle": TrendCard("Target Angle Trend", "#4a7d67"),
-            "detection_count": TrendCard("Detections Trend", "#b15f45"),
-            "match_score": TrendCard("Match Quality Trend", "#8a6a22"),
+            "output_angle": TrendCard(
+                "Servo Output Trend",
+                "#0071e3",
+                y_label="deg",
+                suffix="°",
+                fixed_min=20,
+                fixed_max=160,
+            ),
+            "target_angle": TrendCard(
+                "Target Angle Trend",
+                "#4a7d67",
+                y_label="deg",
+                suffix="°",
+                fixed_min=20,
+                fixed_max=160,
+            ),
+            "detection_count": TrendCard(
+                "Detections Trend",
+                "#b15f45",
+                y_label="count",
+                fixed_min=0,
+                fixed_max=6,
+            ),
+            "match_score": TrendCard(
+                "Match Quality Trend",
+                "#8a6a22",
+                y_label="score",
+                fixed_min=0.0,
+                fixed_max=1.0,
+                precision=2,
+                plot_tick_precision=2,
+            ),
         }
         trends_grid.addWidget(self.trend_cards["output_angle"], 0, 0)
         trends_grid.addWidget(self.trend_cards["target_angle"], 0, 1)
@@ -574,6 +712,12 @@ class InsightsWindow(QtWidgets.QWidget):
                 font-size: 13px;
                 font-weight: 600;
                 color: #2a2a31;
+            }
+            QLabel#TrendAxisLabel {
+                color: #8a8a94;
+                font-size: 11px;
+                font-weight: 500;
+                padding-bottom: 2px;
             }
             QLabel#TrendValue {
                 font-size: 18px;
@@ -679,10 +823,10 @@ class InsightsWindow(QtWidgets.QWidget):
 
         has_history = bool(history)
         self.empty_state.setVisible(not has_history)
-        self.trend_cards["output_angle"].set_series([point.output_angle for point in history], suffix="°")
-        self.trend_cards["target_angle"].set_series([point.target_angle for point in history], suffix="°")
+        self.trend_cards["output_angle"].set_series([point.output_angle for point in history])
+        self.trend_cards["target_angle"].set_series([point.target_angle for point in history])
         self.trend_cards["detection_count"].set_series([point.detection_count for point in history])
-        self.trend_cards["match_score"].set_series([point.match_score for point in history], precision=2)
+        self.trend_cards["match_score"].set_series([point.match_score for point in history])
 
 
 class PointerDesktopWindow(QtWidgets.QMainWindow):

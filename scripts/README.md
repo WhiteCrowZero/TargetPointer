@@ -99,7 +99,7 @@ uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --camera-back
 - 桌面端活动日志默认隐藏，通过窗口右上角 `Activity` 按钮展开。
 - `Insights` 会打开独立分析窗口，用于查看 `target_angle`、`output_angle`、检测数量和匹配质量的短时趋势。
 - `pointer_vision_app.py` 继续保留为算法和摄像头调试入口。
-- `pointer_vision_app.py` 启动时会先读取固件启动日志，再发送 `CENTER`。
+- `pointer_vision_app.py` 启动时会先读取固件启动日志，再发送 `STATUS?` 做链路确认，不主动触发回中。
 - Windows 下 `pointer_vision_app.py` 默认会依次尝试 `msmf`、`dshow`、`any` 三种摄像头 backend。
 - 角度控制当前采用“目标角 + 分段限速输出角”，大偏差时不会直接猛跳到目标角。
 - 目标连续丢失若干帧后，程序会按配置执行 `STOP` 或 `CENTER`，避免舵机持续乱动。

@@ -10,6 +10,8 @@ enum class CommandType : std::uint8_t {
     Center,
     Stop,
     Angle,
+    LedOn,
+    LedOff,
     StatusQuery,
 };
 

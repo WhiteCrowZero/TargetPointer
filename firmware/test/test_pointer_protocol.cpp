@@ -37,6 +37,11 @@ void test_status_query_without_question_mark() {
     assert(command.type == CommandType::StatusQuery);
 }
 
+void test_led_commands() {
+    assert(parse_command_line("LED:ON").type == CommandType::LedOn);
+    assert(parse_command_line("LED:OFF").type == CommandType::LedOff);
+}
+
 void test_unknown_command_is_invalid() {
     const Command command = parse_command_line("TRACK:person");
     assert(command.type == CommandType::Invalid);
@@ -59,6 +64,7 @@ int main() {
     test_invalid_angle_payload();
     test_status_query();
     test_status_query_without_question_mark();
+    test_led_commands();
     test_unknown_command_is_invalid();
     test_safe_angle_range();
     return 0;

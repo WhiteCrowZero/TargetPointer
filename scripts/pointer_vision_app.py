@@ -362,7 +362,7 @@ def main() -> int:
     parser.add_argument("--match-max-area-change", type=float, default=1.25, help="Reject matches when relative area change exceeds this ratio.")
     parser.add_argument("--reacquire-center-ratio-multiplier", type=float, default=1.8, help="Loosen center drift tolerance by this factor during short-term reacquire.")
     parser.add_argument("--reacquire-area-change-multiplier", type=float, default=1.5, help="Loosen area change tolerance by this factor during short-term reacquire.")
-    parser.add_argument("--bbox-smooth-alpha", type=float, default=0.35, help="Exponential smoothing factor for target center updates.")
+    parser.add_argument("--bbox-smooth-alpha", type=float, default=0.28, help="Exponential smoothing factor for target center updates.")
     parser.add_argument("--reacquire-frames", type=int, default=12, help="Allow this many missed detection cycles before declaring loss.")
     parser.add_argument("--min-box-width", type=int, default=40, help="Ignore detections narrower than this many pixels.")
     parser.add_argument("--min-box-height", type=int, default=80, help="Ignore detections shorter than this many pixels.")
@@ -376,12 +376,12 @@ def main() -> int:
     parser.add_argument("--center-deadzone", type=int, default=2, help="Keep commands at center when within this many degrees.")
     parser.add_argument("--smooth-step", type=int, default=4, help="Legacy fixed-step option. Kept for compatibility but not used by the default adaptive controller.")
     parser.add_argument("--angle-small-error-threshold", type=int, default=4, help="Use the small step when angle error is within this range.")
-    parser.add_argument("--angle-medium-error-threshold", type=int, default=18, help="Use the medium step when angle error is within this range.")
+    parser.add_argument("--angle-medium-error-threshold", type=int, default=16, help="Use the medium step when angle error is within this range.")
     parser.add_argument("--angle-small-step", type=int, default=1, help="Max per-update angle change for small errors.")
-    parser.add_argument("--angle-medium-step", type=int, default=3, help="Max per-update angle change for medium errors.")
-    parser.add_argument("--angle-large-step", type=int, default=6, help="Max per-update angle change for large errors.")
+    parser.add_argument("--angle-medium-step", type=int, default=2, help="Max per-update angle change for medium errors.")
+    parser.add_argument("--angle-large-step", type=int, default=4, help="Max per-update angle change for large errors.")
     parser.add_argument("--angle-hold-threshold", type=int, default=2, help="Ignore target-angle jitter within this many degrees of the current output angle.")
-    parser.add_argument("--angle-step-threshold", type=int, default=2, help="Only resend angle when the change is at least this many degrees.")
+    parser.add_argument("--angle-step-threshold", type=int, default=1, help="Only resend angle when the change is at least this many degrees.")
     parser.add_argument("--on-loss", choices=("stop", "center"), default="stop", help="Behavior after continuous target loss.")
     parser.add_argument("--verbose", action="store_true", help="Print host-side state transitions and commands.")
     args = parser.parse_args()
@@ -462,12 +462,12 @@ def main() -> int:
             serial_client.read_startup(args.startup_timeout, args.serial_idle_timeout)
         send_control_command(
             serial_client,
-            "CENTER",
+            "STATUS?",
             response_timeout=args.serial_response_timeout,
             idle_timeout=args.serial_idle_timeout,
             require_response=True,
         )
-        last_sent_angle = args.center_angle
+        last_sent_angle = None
 
         while True:
             ok, frame = capture.read()
@@ -538,7 +538,7 @@ def main() -> int:
                         state.last_match = None
                         state.last_match_success = False
                         if loss_command == "CENTER":
-                            last_sent_angle = args.center_angle
+                            last_sent_angle = None
                         if args.verbose and responses:
                             print(responses[-1])
                         target_angle = args.center_angle if loss_command == "CENTER" else None
@@ -614,7 +614,7 @@ def main() -> int:
                 state.last_match = None
                 state.last_match_success = False
                 missed_frames = 0
-                last_sent_angle = args.center_angle
+                last_sent_angle = None
                 if args.verbose and responses:
                     print(responses[-1])
             elif key == ord("x"):

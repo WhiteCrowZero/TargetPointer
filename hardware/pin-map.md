@@ -11,7 +11,7 @@
 - `PA9`: `USART1 TX`，Blue Pill 发回调试与状态信息到 `CH340 RX`
 - `PA10`: `USART1 RX`，接收上位机文本命令
 - `PA13 / PA14`: `SWDIO / SWCLK`，连接 `ST-LINK V2`
-- `PC13`: 板载状态 LED
+- `PC13`: 板载目标状态指示 LED
 
 ## Wiring Notes
 
@@ -20,6 +20,7 @@
 - `SG90 signal -> PA8`
 - `SG90 5V -> 独立 5V 电源`
 - `Blue Pill GND / CH340 GND / SG90 GND` 必须共地
+- `PC13` 当前用于“目标已锁定/重获中亮起，丢失/空闲熄灭”的阶段指示
 
 ## Constraints
 
