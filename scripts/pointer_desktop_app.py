@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
+from dataclasses import dataclass
 import sys
+import time
 
 try:
     import cv2
@@ -32,6 +35,8 @@ from pointer_runtime import PointerRuntime, RuntimeSnapshot, list_serial_ports
 
 
 WINDOW_TITLE = "TargetPointer Console"
+WINDOW_ICON_TEXT = "➜"
+INSIGHTS_ICON_TEXT = "↗"
 
 TRACKING_LABELS = {
     "selecting": "Selecting",
@@ -53,6 +58,72 @@ def format_model_display_name(model_name: str) -> str:
     if not normalized:
         return model_name
     return normalized.split("/")[-1]
+
+
+def format_metric(value: int | float | None, precision: int = 0) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:.{precision}f}"
+    return str(value)
+
+
+@dataclass(frozen=True)
+class HistoryPoint:
+    timestamp: float
+    tracking_state: str
+    target_angle: int | None
+    output_angle: int | None
+    detection_count: int
+    missed_frames: int
+    match_score: float | None
+
+
+def build_history_point(snapshot: RuntimeSnapshot, timestamp: float) -> HistoryPoint:
+    return HistoryPoint(
+        timestamp=timestamp,
+        tracking_state=snapshot.tracking_state,
+        target_angle=snapshot.target_angle,
+        output_angle=snapshot.output_angle,
+        detection_count=len(snapshot.pending_detections),
+        missed_frames=snapshot.missed_frames,
+        match_score=None if snapshot.last_match is None else snapshot.last_match.score,
+    )
+
+
+def latest_non_none(values: list[int | float | None]) -> int | float | None:
+    for value in reversed(values):
+        if value is not None:
+            return value
+    return None
+
+
+def build_arrow_icon(
+    glyph: str,
+    *,
+    size: int = 128,
+    background: str = "#eef5ff",
+    foreground: str = "#0071e3",
+) -> QtGui.QIcon:
+    pixmap = QtGui.QPixmap(size, size)
+    pixmap.fill(QtCore.Qt.transparent)
+
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    painter.setPen(QtCore.Qt.NoPen)
+    painter.setBrush(QtGui.QColor(background))
+    painter.drawRoundedRect(QtCore.QRectF(6, 6, size - 12, size - 12), 28, 28)
+
+    font = QtGui.QFont("Segoe UI Emoji")
+    if not QtGui.QFontInfo(font).exactMatch():
+        font = QtGui.QFont("Segoe UI Symbol")
+    font.setPixelSize(int(size * 0.48))
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QtGui.QColor(foreground))
+    painter.drawText(QtCore.QRectF(0, 0, size, size), QtCore.Qt.AlignCenter, glyph)
+    painter.end()
+    return QtGui.QIcon(pixmap)
 
 
 def frame_to_qpixmap(frame) -> QtGui.QPixmap:
@@ -294,6 +365,326 @@ class ActivityDialog(QtWidgets.QDialog):
         layout.addWidget(shell)
 
 
+class TrendPlot(QtWidgets.QWidget):
+    def __init__(self, color: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.color = QtGui.QColor(color)
+        self.values: list[int | float | None] = []
+        self.setMinimumHeight(90)
+
+    def set_values(self, values: list[int | float | None]) -> None:
+        self.values = values
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        rect = self.rect().adjusted(4, 6, -4, -6)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#ececf1"), 1))
+        for step in range(1, 3):
+            y = rect.top() + rect.height() * step / 3
+            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
+
+        valid_points = [(index, value) for index, value in enumerate(self.values) if value is not None]
+        if len(valid_points) < 2:
+            return
+
+        numeric_values = [float(value) for _, value in valid_points]
+        minimum = min(numeric_values)
+        maximum = max(numeric_values)
+        span = maximum - minimum
+        if span < 1e-6:
+            span = 1.0
+
+        last_index = max(1, len(self.values) - 1)
+        path = QtGui.QPainterPath()
+        first_index, first_value = valid_points[0]
+        first_x = rect.left() + rect.width() * first_index / last_index
+        first_y = rect.bottom() - rect.height() * ((float(first_value) - minimum) / span)
+        path.moveTo(first_x, first_y)
+
+        for index, value in valid_points[1:]:
+            x = rect.left() + rect.width() * index / last_index
+            y = rect.bottom() - rect.height() * ((float(value) - minimum) / span)
+            path.lineTo(x, y)
+
+        painter.setPen(QtGui.QPen(self.color, 2.2))
+        painter.drawPath(path)
+
+        final_x, final_y = path.currentPosition().x(), path.currentPosition().y()
+        painter.setBrush(self.color)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawEllipse(QtCore.QPointF(final_x, final_y), 3.5, 3.5)
+
+
+class TrendCard(QtWidgets.QFrame):
+    def __init__(self, title: str, color: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("TrendCard")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+
+        heading_row = QtWidgets.QHBoxLayout()
+        heading_row.setSpacing(10)
+        self.title_label = QtWidgets.QLabel(title)
+        self.title_label.setObjectName("TrendTitle")
+        self.value_label = QtWidgets.QLabel("—")
+        self.value_label.setObjectName("TrendValue")
+        heading_row.addWidget(self.title_label)
+        heading_row.addStretch(1)
+        heading_row.addWidget(self.value_label)
+
+        self.plot = TrendPlot(color)
+        layout.addLayout(heading_row)
+        layout.addWidget(self.plot)
+
+    def set_series(self, values: list[int | float | None], precision: int = 0, suffix: str = "") -> None:
+        latest_value = latest_non_none(values)
+        if latest_value is None:
+            self.value_label.setText("—")
+        elif isinstance(latest_value, float):
+            self.value_label.setText(f"{latest_value:.{precision}f}{suffix}")
+        else:
+            self.value_label.setText(f"{latest_value}{suffix}")
+        self.plot.set_values(values)
+
+
+class InsightsWindow(QtWidgets.QWidget):
+    def __init__(self) -> None:
+        super().__init__(None)
+        self.setWindowTitle("TargetPointer Insights")
+        self.setWindowFlag(QtCore.Qt.Window, True)
+        self.resize(1120, 760)
+        self._build_ui()
+        self._apply_styles()
+
+    def _build_ui(self) -> None:
+        root_layout = QtWidgets.QVBoxLayout(self)
+        root_layout.setContentsMargins(24, 22, 24, 22)
+        root_layout.setSpacing(18)
+
+        header = QtWidgets.QFrame()
+        header.setObjectName("InsightsHeader")
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 16, 20, 16)
+        header_layout.setSpacing(16)
+
+        title_stack = QtWidgets.QVBoxLayout()
+        title_stack.setSpacing(2)
+        title_label = QtWidgets.QLabel(f"{INSIGHTS_ICON_TEXT} Insights")
+        title_label.setObjectName("InsightsTitle")
+        subtitle_label = QtWidgets.QLabel("A richer view of what the system is doing right now.")
+        subtitle_label.setObjectName("InsightsSubtitle")
+        title_stack.addWidget(title_label)
+        title_stack.addWidget(subtitle_label)
+
+        self.state_badge = StatusBadge("Idle")
+        self.device_badge = StatusBadge("Device Offline")
+
+        header_layout.addLayout(title_stack)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self.device_badge)
+        header_layout.addWidget(self.state_badge)
+
+        summary_grid = QtWidgets.QGridLayout()
+        summary_grid.setHorizontalSpacing(12)
+        summary_grid.setVerticalSpacing(12)
+        self.summary_tiles = {
+            "target_angle": StatTile("Target Angle", featured=True),
+            "output_angle": StatTile("Servo Output"),
+            "tracking": StatTile("Tracking"),
+            "detections": StatTile("Detections"),
+            "missed_frames": StatTile("Missed Frames"),
+            "match": StatTile("Match"),
+        }
+        ordered_summary = [
+            self.summary_tiles["target_angle"],
+            self.summary_tiles["output_angle"],
+            self.summary_tiles["tracking"],
+            self.summary_tiles["detections"],
+            self.summary_tiles["missed_frames"],
+            self.summary_tiles["match"],
+        ]
+        for index, tile in enumerate(ordered_summary):
+            row = index // 3
+            column = index % 3
+            summary_grid.addWidget(tile, row, column)
+
+        trends_grid = QtWidgets.QGridLayout()
+        trends_grid.setHorizontalSpacing(14)
+        trends_grid.setVerticalSpacing(14)
+        self.trend_cards = {
+            "output_angle": TrendCard("Servo Output Trend", "#0071e3"),
+            "target_angle": TrendCard("Target Angle Trend", "#4a7d67"),
+            "detection_count": TrendCard("Detections Trend", "#b15f45"),
+            "match_score": TrendCard("Match Quality Trend", "#8a6a22"),
+        }
+        trends_grid.addWidget(self.trend_cards["output_angle"], 0, 0)
+        trends_grid.addWidget(self.trend_cards["target_angle"], 0, 1)
+        trends_grid.addWidget(self.trend_cards["detection_count"], 1, 0)
+        trends_grid.addWidget(self.trend_cards["match_score"], 1, 1)
+
+        self.empty_state = QtWidgets.QLabel(
+            "Open a camera and lock a target to populate the insights dashboard."
+        )
+        self.empty_state.setObjectName("InsightsEmptyState")
+        self.empty_state.setAlignment(QtCore.Qt.AlignCenter)
+
+        root_layout.addWidget(header)
+        root_layout.addLayout(summary_grid)
+        root_layout.addLayout(trends_grid, stretch=1)
+        root_layout.addWidget(self.empty_state)
+
+    def _apply_styles(self) -> None:
+        self.setStyleSheet(
+            """
+            QWidget {
+                background: #f4f4f7;
+                color: #18181c;
+                font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+                font-size: 14px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            QFrame#InsightsHeader,
+            QFrame#TrendCard,
+            QFrame#StatTile {
+                background: #ffffff;
+                border: 1px solid #e7e7ec;
+                border-radius: 22px;
+            }
+            QFrame#TrendCard {
+                border-radius: 20px;
+            }
+            QLabel#InsightsTitle {
+                font-size: 24px;
+                font-weight: 600;
+                color: #111114;
+            }
+            QLabel#InsightsSubtitle {
+                font-size: 12px;
+                color: #6d6d76;
+            }
+            QLabel#TrendTitle {
+                font-size: 13px;
+                font-weight: 600;
+                color: #2a2a31;
+            }
+            QLabel#TrendValue {
+                font-size: 18px;
+                font-weight: 700;
+                color: #111114;
+            }
+            QLabel#InsightsEmptyState {
+                font-size: 13px;
+                color: #6d6d76;
+                padding: 20px 0 2px 0;
+            }
+            QFrame#StatTile[featured="true"] {
+                background: #eff6ff;
+                border: 1px solid #d9e8ff;
+            }
+            QFrame#StatTile[featured="true"] QLabel#TileValue {
+                color: #005fc1;
+            }
+            QLabel[ tone="soft" ] {
+                background: #f2f2f7;
+                color: #4a4a52;
+                border: 1px solid #e5e5ea;
+                border-radius: 999px;
+                padding: 7px 13px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel[ tone="good" ] {
+                background: #e7f1ff;
+                color: #0066cc;
+                border: 1px solid #d4e5fb;
+                border-radius: 999px;
+                padding: 7px 13px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel[ tone="warm" ] {
+                background: #fff3d8;
+                color: #9a6b00;
+                border: 1px solid #f3e3b7;
+                border-radius: 999px;
+                padding: 7px 13px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel[ tone="danger" ] {
+                background: #f7e8e7;
+                color: #9a4c47;
+                border: 1px solid #efd4d2;
+                border-radius: 999px;
+                padding: 7px 13px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel#TileLabel {
+                color: #8d8d96;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.4px;
+            }
+            QLabel#TileValue {
+                color: #18181c;
+                font-size: 20px;
+                font-weight: 700;
+            }
+            """
+        )
+
+    def update_from_snapshot(
+        self,
+        snapshot: RuntimeSnapshot | None,
+        history: list[HistoryPoint],
+    ) -> None:
+        if snapshot is None:
+            self.summary_tiles["target_angle"].set_value("—")
+            self.summary_tiles["output_angle"].set_value("—")
+            self.summary_tiles["tracking"].set_value("idle")
+            self.summary_tiles["detections"].set_value("0")
+            self.summary_tiles["missed_frames"].set_value("0")
+            self.summary_tiles["match"].set_value("none")
+            self.state_badge.set_badge("Idle", "soft")
+            self.device_badge.set_badge("Device Offline", "danger")
+            self.empty_state.show()
+            for card in self.trend_cards.values():
+                card.set_series([])
+            return
+
+        tracking_label = TRACKING_LABELS.get(snapshot.tracking_state, snapshot.tracking_state.title())
+        tracking_tone = TRACKING_TONES.get(snapshot.tracking_state, "soft")
+        self.summary_tiles["target_angle"].set_value(format_metric(snapshot.target_angle))
+        self.summary_tiles["output_angle"].set_value(format_metric(snapshot.output_angle))
+        self.summary_tiles["tracking"].set_value(tracking_label)
+        self.summary_tiles["detections"].set_value(str(len(snapshot.pending_detections)))
+        self.summary_tiles["missed_frames"].set_value(str(snapshot.missed_frames))
+        self.summary_tiles["match"].set_value(
+            "none" if snapshot.last_match is None else f"{snapshot.last_match.score:.2f}"
+        )
+        self.state_badge.set_badge(tracking_label, tracking_tone)
+        if snapshot.serial_connected and snapshot.serial_port:
+            self.device_badge.set_badge(snapshot.serial_port, "good")
+        else:
+            self.device_badge.set_badge("Device Offline", "danger")
+
+        has_history = bool(history)
+        self.empty_state.setVisible(not has_history)
+        self.trend_cards["output_angle"].set_series([point.output_angle for point in history], suffix="°")
+        self.trend_cards["target_angle"].set_series([point.target_angle for point in history], suffix="°")
+        self.trend_cards["detection_count"].set_series([point.detection_count for point in history])
+        self.trend_cards["match_score"].set_series([point.match_score for point in history], precision=2)
+
+
 class PointerDesktopWindow(QtWidgets.QMainWindow):
     def __init__(self, runtime: PointerRuntime, initial_camera: str | None, initial_port: str | None) -> None:
         super().__init__()
@@ -301,10 +692,14 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.initial_camera = initial_camera
         self.initial_port = initial_port
         self.latest_snapshot: RuntimeSnapshot | None = None
+        self.history_points: deque[HistoryPoint] = deque(maxlen=240)
 
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1560, 980)
+        self.setWindowIcon(build_arrow_icon(WINDOW_ICON_TEXT))
         self.activity_dialog = ActivityDialog(self)
+        self.insights_window = InsightsWindow()
+        self.insights_window.setWindowIcon(build_arrow_icon(INSIGHTS_ICON_TEXT, background="#f1f7ff"))
 
         self.refresh_timer = QtCore.QTimer(self)
         self.refresh_timer.setInterval(33)
@@ -326,6 +721,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.refresh_timer.stop()
         self.runtime.close_camera()
         self.runtime.disconnect_serial()
+        self.insights_window.close()
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -353,7 +749,6 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
 
         brand_stack = QtWidgets.QVBoxLayout()
         brand_stack.setSpacing(0)
-
         brand_label = QtWidgets.QLabel("TargetPointer")
         brand_label.setObjectName("BrandLabel")
         subtitle_label = QtWidgets.QLabel("Fixed-camera person pointing console")
@@ -363,12 +758,14 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         brand_stack.addWidget(subtitle_label)
 
         self.device_badge = StatusBadge("Device Offline")
+        self.insights_button = self._make_button(f"{INSIGHTS_ICON_TEXT} Insights", "HeaderPillButton")
         self.activity_button = self._make_button("Activity", "HeaderPillButton")
         self.header_status = StatusBadge("Selecting")
 
         layout.addLayout(brand_stack)
         layout.addStretch(1)
         layout.addWidget(self.device_badge)
+        layout.addWidget(self.insights_button)
         layout.addWidget(self.activity_button)
         layout.addWidget(self.header_status)
         return header
@@ -587,6 +984,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.stop_button.clicked.connect(self._stop_device)
         self.video_widget.point_selected.connect(self._select_target)
         self.video_widget.bbox_selected.connect(self._select_target_bbox)
+        self.insights_button.clicked.connect(self._toggle_insights)
         self.activity_button.clicked.connect(self._toggle_activity)
 
     def _apply_styles(self) -> None:
@@ -905,17 +1303,22 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             self._log(f"Open camera failed: {exc}")
             return
 
+        self._clear_history()
         self.backend_value.setText(backend_name)
         self.camera_hint.set_badge(f"Camera {source}", "soft")
         self.refresh_timer.start()
+        self._push_insights_snapshot(None)
         self._log(f"Camera opened: source={source} backend={backend_name}")
 
     def _close_camera(self) -> None:
         self.refresh_timer.stop()
         self.runtime.close_camera()
+        self.latest_snapshot = None
+        self._clear_history()
         self.video_widget.clear_preview("Open a camera to start the stage preview")
         self.camera_hint.set_badge("Camera Closed", "soft")
         self._update_status_labels(None, force_idle=False)
+        self._push_insights_snapshot(None)
         self._log("Camera closed")
 
     def _connect_serial(self) -> None:
@@ -986,6 +1389,39 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.activity_dialog.raise_()
         self.activity_dialog.activateWindow()
 
+    def _toggle_insights(self) -> None:
+        if self.insights_window.isVisible():
+            self.insights_window.hide()
+            return
+        self._position_aux_window(self.insights_window, horizontal_gap=18)
+        self.insights_window.show()
+        self.insights_window.raise_()
+        self.insights_window.activateWindow()
+
+    def _position_aux_window(self, window: QtWidgets.QWidget, horizontal_gap: int = 22) -> None:
+        main_geometry = self.frameGeometry()
+        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        target_x = main_geometry.right() + horizontal_gap
+        target_y = main_geometry.top() + 36
+
+        if target_x + window.width() > available.right():
+            target_x = max(available.left() + 20, main_geometry.left() - window.width() - horizontal_gap)
+
+        if target_y + window.height() > available.bottom():
+            target_y = max(available.top() + 20, available.bottom() - window.height() - 20)
+
+        window.move(target_x, target_y)
+
+    def _clear_history(self) -> None:
+        self.history_points.clear()
+
+    def _push_insights_snapshot(self, snapshot: RuntimeSnapshot | None) -> None:
+        self.insights_window.update_from_snapshot(snapshot, list(self.history_points))
+
     def _tick(self) -> None:
         try:
             snapshot = self.runtime.process_next_frame()
@@ -995,8 +1431,10 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             return
 
         self.latest_snapshot = snapshot
+        self.history_points.append(build_history_point(snapshot, time.monotonic()))
         self.video_widget.set_frame(render_preview_frame(snapshot))
         self._update_status_labels(snapshot)
+        self._push_insights_snapshot(snapshot)
 
     def _update_status_labels(
         self,
@@ -1074,6 +1512,7 @@ def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("TargetPointer")
     app.setStyle("Fusion")
+    app.setWindowIcon(build_arrow_icon(WINDOW_ICON_TEXT))
     runtime = build_runtime_from_args(args)
     window = PointerDesktopWindow(runtime, initial_camera=args.camera, initial_port=args.port)
     window.show()

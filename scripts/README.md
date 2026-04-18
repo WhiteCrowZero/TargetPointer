@@ -13,7 +13,7 @@
 - `pointer_vision_app.py`
   摄像头读取、YOLO 推理、目标选择、可视化、串口联动。
 - `pointer_desktop_app.py`
-  Windows 优先的单窗口桌面应用入口，提供视频舞台、右侧操作面板，以及默认隐藏的活动日志弹层。
+  Windows 优先的桌面应用入口，提供视频舞台、右侧操作面板、默认隐藏的活动日志弹层，以及独立的 Insights 分析页。
 - `pointer_serial_cli.py`
   手动串口调试工具，用于固件联调和协议验证。
 
@@ -97,6 +97,7 @@ uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --camera-back
 - `pointer_desktop_app.py` 是首选演示入口；它不会在启动时自动扫摄像头，优先使用 `--camera` 和 `--camera-backend`。
 - `pointer_desktop_app.py` 支持点击检测框和拖框初始化两种交互。
 - 桌面端活动日志默认隐藏，通过窗口右上角 `Activity` 按钮展开。
+- `Insights` 会打开独立分析窗口，用于查看 `target_angle`、`output_angle`、检测数量和匹配质量的短时趋势。
 - `pointer_vision_app.py` 继续保留为算法和摄像头调试入口。
 - `pointer_vision_app.py` 启动时会先读取固件启动日志，再发送 `CENTER`。
 - Windows 下 `pointer_vision_app.py` 默认会依次尝试 `msmf`、`dshow`、`any` 三种摄像头 backend。
