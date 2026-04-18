@@ -7,7 +7,7 @@
 - `pointer_serial.py`
   串口通信、命令发送、响应读取、状态查询。
 - `pointer_host_logic.py`
-  目标水平偏移到控制量的映射、死区、平滑、丢失策略等纯逻辑。
+  目标水平偏移到控制量的映射、死区、自适应分段限速、最小发送阈值、丢失策略等纯逻辑。
 - `pointer_runtime.py`
   上位机运行时控制层，负责摄像头、YOLO、目标维护、串口和状态快照。
 - `pointer_vision_app.py`
@@ -73,11 +73,19 @@ uv run python scripts/pointer_vision_app.py --list-cameras
 uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --camera-backend msmf --model yolov8n.pt --verbose
 ```
 
+## 当前完成度
+
+- 已完成：
+  YOLO 人物检测初始化、单目标重关联、桌面端 UI、点击选人、手动框选、串口联动、自适应分段限速角度控制。
+- 仍待实机验证：
+  独立 5V 条件下的舵机速度/抖动/安全角度标定。
+
 ## 交互约定
 
 - 运行后默认打开实时画面窗口。
 - 空闲状态下会显示 YOLO 检测到的人物框。
 - 鼠标左键点击某个人物框可开始跟踪。
+- 在桌面端视频区拖一个框，也可以手动指定初始化区域。
 - 按 `r` 可手动框选人物区域。
 - 按 `d` 可强制刷新一次 YOLO 检测。
 - 按 `c` 回中，按 `x` 停止，按 `q` 退出。
@@ -87,8 +95,10 @@ uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --camera-back
 - `pointer_serial_cli.py` 会校验固件返回，收到 `ERR:*` 或无响应时以非零状态退出。
 - `pointer_serial_cli.py` 的 `status` 子命令会先发 `STATUS?`，旧固件若返回 `ERR:BAD_CMD` 会自动回退到 `STATUS`。
 - `pointer_desktop_app.py` 是首选演示入口；它不会在启动时自动扫摄像头，优先使用 `--camera` 和 `--camera-backend`。
+- `pointer_desktop_app.py` 支持点击检测框和拖框初始化两种交互。
 - 桌面端活动日志默认隐藏，通过窗口右上角 `Activity` 按钮展开。
 - `pointer_vision_app.py` 继续保留为算法和摄像头调试入口。
 - `pointer_vision_app.py` 启动时会先读取固件启动日志，再发送 `CENTER`。
 - Windows 下 `pointer_vision_app.py` 默认会依次尝试 `msmf`、`dshow`、`any` 三种摄像头 backend。
+- 角度控制当前采用“目标角 + 分段限速输出角”，大偏差时不会直接猛跳到目标角。
 - 目标连续丢失若干帧后，程序会按配置执行 `STOP` 或 `CENTER`，避免舵机持续乱动。

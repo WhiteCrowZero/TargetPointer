@@ -154,6 +154,16 @@ def apply_deadzone(angle: int, center_angle: int, deadzone_deg: int) -> int:
     return angle
 
 
+def hold_angle_if_within_threshold(current_angle: int | None, target_angle: int, hold_threshold: int) -> int:
+    if hold_threshold < 0:
+        raise ValueError("hold_threshold must be non-negative")
+    if current_angle is None:
+        return target_angle
+    if abs(target_angle - current_angle) <= hold_threshold:
+        return current_angle
+    return target_angle
+
+
 def smooth_angle(last_angle: int | None, next_angle: int, max_step: int) -> int:
     if max_step < 0:
         raise ValueError("max_step must be non-negative")
@@ -165,6 +175,55 @@ def smooth_angle(last_angle: int | None, next_angle: int, max_step: int) -> int:
     if next_angle < last_angle - max_step:
         return last_angle - max_step
     return next_angle
+
+
+def resolve_angle_step(
+    current_angle: int,
+    target_angle: int,
+    small_error_threshold: int,
+    medium_error_threshold: int,
+    small_step: int,
+    medium_step: int,
+    large_step: int,
+) -> int:
+    if small_error_threshold < 0:
+        raise ValueError("small_error_threshold must be non-negative")
+    if medium_error_threshold < small_error_threshold:
+        raise ValueError("medium_error_threshold must be >= small_error_threshold")
+    if small_step <= 0 or medium_step <= 0 or large_step <= 0:
+        raise ValueError("angle steps must be positive")
+    if not small_step <= medium_step <= large_step:
+        raise ValueError("angle steps must be ordered small <= medium <= large")
+
+    angle_error = abs(target_angle - current_angle)
+    if angle_error <= small_error_threshold:
+        return small_step
+    if angle_error <= medium_error_threshold:
+        return medium_step
+    return large_step
+
+
+def smooth_angle_adaptive(
+    last_angle: int | None,
+    target_angle: int,
+    center_angle: int,
+    small_error_threshold: int,
+    medium_error_threshold: int,
+    small_step: int,
+    medium_step: int,
+    large_step: int,
+) -> int:
+    current_angle = center_angle if last_angle is None else last_angle
+    max_step = resolve_angle_step(
+        current_angle,
+        target_angle,
+        small_error_threshold,
+        medium_error_threshold,
+        small_step,
+        medium_step,
+        large_step,
+    )
+    return smooth_angle(current_angle, target_angle, max_step)
 
 
 def should_send_angle(last_sent_angle: int | None, next_angle: int, threshold: int) -> bool:

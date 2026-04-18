@@ -9,11 +9,14 @@ from pointer_host_logic import (
     apply_deadzone,
     bbox_iou,
     center_distance_ratio,
+    hold_angle_if_within_threshold,
     map_center_to_angle,
     match_target_bbox,
+    resolve_angle_step,
     should_send_angle,
     should_stop_for_loss,
     smooth_angle,
+    smooth_angle_adaptive,
     smooth_center,
 )
 
@@ -81,10 +84,64 @@ class PointerHostLogicTests(unittest.TestCase):
         self.assertEqual(apply_deadzone(91, 90, 2), 90)
         self.assertEqual(apply_deadzone(95, 90, 2), 95)
 
+    def test_hold_angle_if_within_threshold_absorbs_small_jitter(self) -> None:
+        self.assertEqual(hold_angle_if_within_threshold(90, 92, 2), 90)
+        self.assertEqual(hold_angle_if_within_threshold(90, 93, 2), 93)
+
     def test_smooth_angle_limits_step_size(self) -> None:
         self.assertEqual(smooth_angle(None, 120, 4), 120)
         self.assertEqual(smooth_angle(90, 100, 4), 94)
         self.assertEqual(smooth_angle(90, 87, 4), 87)
+
+    def test_resolve_angle_step_uses_three_error_bands(self) -> None:
+        self.assertEqual(resolve_angle_step(90, 92, 4, 18, 1, 3, 6), 1)
+        self.assertEqual(resolve_angle_step(90, 100, 4, 18, 1, 3, 6), 3)
+        self.assertEqual(resolve_angle_step(90, 20, 4, 18, 1, 3, 6), 6)
+
+    def test_smooth_angle_adaptive_avoids_initial_jump_from_center(self) -> None:
+        self.assertEqual(
+            smooth_angle_adaptive(
+                None,
+                20,
+                90,
+                small_error_threshold=4,
+                medium_error_threshold=18,
+                small_step=1,
+                medium_step=3,
+                large_step=6,
+            ),
+            84,
+        )
+
+    def test_smooth_angle_adaptive_uses_small_step_near_target(self) -> None:
+        self.assertEqual(
+            smooth_angle_adaptive(
+                12,
+                10,
+                90,
+                small_error_threshold=4,
+                medium_error_threshold=18,
+                small_step=1,
+                medium_step=3,
+                large_step=6,
+            ),
+            11,
+        )
+
+    def test_smooth_angle_adaptive_stays_monotonic_toward_target(self) -> None:
+        self.assertEqual(
+            smooth_angle_adaptive(
+                90,
+                160,
+                90,
+                small_error_threshold=4,
+                medium_error_threshold=18,
+                small_step=1,
+                medium_step=3,
+                large_step=6,
+            ),
+            96,
+        )
 
     def test_should_send_angle_respects_threshold(self) -> None:
         self.assertTrue(should_send_angle(None, 90, 2))

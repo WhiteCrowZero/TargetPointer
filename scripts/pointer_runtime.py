@@ -19,6 +19,7 @@ from pointer_vision_app import (
     STATE_REACQUIRING,
     STATE_SELECTING,
     AppState,
+    compute_target_servo_angle,
     DetectionCandidate,
     attempt_match,
     compute_servo_angle,
@@ -37,6 +38,7 @@ class RuntimeSnapshot:
     pending_detections: list[DetectionCandidate]
     tracked_bbox: BBox | None
     smoothed_target_center: tuple[float, float] | None
+    target_angle: int | None
     output_angle: int | None
     missed_frames: int
     on_loss: str
@@ -77,6 +79,12 @@ class PointerRuntime:
         max_angle: int = 160,
         center_deadzone: int = 2,
         smooth_step: int = 4,
+        angle_small_error_threshold: int = 4,
+        angle_medium_error_threshold: int = 18,
+        angle_small_step: int = 1,
+        angle_medium_step: int = 3,
+        angle_large_step: int = 6,
+        angle_hold_threshold: int = 2,
         angle_step_threshold: int = 2,
         on_loss: str = "stop",
         serial_baud: int = 115200,
@@ -100,6 +108,12 @@ class PointerRuntime:
             max_angle=max_angle,
             center_deadzone=center_deadzone,
             smooth_step=smooth_step,
+            angle_small_error_threshold=angle_small_error_threshold,
+            angle_medium_error_threshold=angle_medium_error_threshold,
+            angle_small_step=angle_small_step,
+            angle_medium_step=angle_medium_step,
+            angle_large_step=angle_large_step,
+            angle_hold_threshold=angle_hold_threshold,
             angle_step_threshold=angle_step_threshold,
             match_min_iou=match_min_iou,
             match_max_center_ratio=match_max_center_ratio,
@@ -131,6 +145,7 @@ class PointerRuntime:
         self.tracked_bbox: BBox | None = None
         self.smoothed_target_center: tuple[float, float] | None = None
         self.last_output_angle: int | None = None
+        self.last_target_angle: int | None = None
         self.missed_frames = 0
         self.frame_index = 0
         self.force_detection = False
@@ -197,6 +212,7 @@ class PointerRuntime:
     def clear_tracking(self) -> None:
         self.tracked_bbox = None
         self.smoothed_target_center = None
+        self.last_target_angle = None
         self.state.pending_selection = None
         self.state.last_match = None
         self.state.last_match_success = False
@@ -214,6 +230,7 @@ class PointerRuntime:
                 require_response=True,
             )
         self.last_output_angle = self.args.center_angle
+        self.last_target_angle = self.args.center_angle
         self.clear_tracking()
         return responses
 
@@ -247,6 +264,9 @@ class PointerRuntime:
         responses: list[str] = []
         if self.args.on_loss == "center":
             self.last_output_angle = self.args.center_angle
+            self.last_target_angle = self.args.center_angle
+        else:
+            self.last_target_angle = None
         if self.serial_client is not None:
             loss_command = "CENTER" if self.args.on_loss == "center" else "STOP"
             responses = send_control_command(
@@ -320,9 +340,14 @@ class PointerRuntime:
                     self._loss_action()
 
         if self.tracked_bbox is not None and self.smoothed_target_center is not None and (just_selected or self.state.last_match_success):
+            self.last_target_angle = compute_target_servo_angle(
+                self.smoothed_target_center,
+                frame.shape[1],
+                self.args,
+                current_output_angle=self.last_output_angle,
+            )
             output_angle = compute_servo_angle(self.smoothed_target_center, frame.shape[1], self.last_output_angle, self.args)
             should_send = should_send_angle(self.last_output_angle, output_angle, self.args.angle_step_threshold)
-            self.last_output_angle = output_angle
             if self.serial_client is not None:
                 if just_selected or should_send:
                     send_control_command(
@@ -332,9 +357,14 @@ class PointerRuntime:
                         idle_timeout=self.serial_idle_timeout,
                         require_response=True,
                     )
+                    self.last_output_angle = output_angle
+            else:
+                if just_selected or should_send:
+                    self.last_output_angle = output_angle
 
         if self.tracked_bbox is None and self.state.tracking_state != STATE_LOST:
             self.state.tracking_state = STATE_SELECTING
+            self.last_target_angle = None
 
         return RuntimeSnapshot(
             frame=frame,
@@ -342,6 +372,7 @@ class PointerRuntime:
             pending_detections=list(self.state.pending_detections),
             tracked_bbox=self.tracked_bbox,
             smoothed_target_center=self.smoothed_target_center,
+            target_angle=self.last_target_angle,
             output_angle=self.last_output_angle,
             missed_frames=self.missed_frames,
             on_loss=self.args.on_loss,

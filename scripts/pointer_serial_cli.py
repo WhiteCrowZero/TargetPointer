@@ -78,6 +78,38 @@ def send_with_fallback(
     raise last_error if last_error is not None else PointerSerialError("No command candidates were provided")
 
 
+def send_with_recovery(
+    device: PointerSerialClient,
+    commands: list[str],
+    response_timeout: float,
+    idle_timeout: float,
+    require_response: bool,
+    recovery_timeout: float,
+) -> tuple[str, list[str], list[str]]:
+    try:
+        command, responses = send_with_fallback(
+            device,
+            commands,
+            response_timeout=response_timeout,
+            idle_timeout=idle_timeout,
+            require_response=require_response,
+        )
+        return command, responses, []
+    except PointerSerialError as exc:
+        if recovery_timeout <= 0 or "no response" not in str(exc):
+            raise
+
+    startup_lines = device.read_startup(recovery_timeout, idle_timeout)
+    command, responses = send_with_fallback(
+        device,
+        commands,
+        response_timeout=response_timeout,
+        idle_timeout=idle_timeout,
+        require_response=require_response,
+    )
+    return command, responses, startup_lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Manual serial controller for the TargetPointer firmware.")
     parser.add_argument("--port", required=True, help="Serial port, for example COM5 or /dev/ttyUSB0.")
@@ -86,6 +118,12 @@ def main() -> int:
     parser.add_argument("--response-timeout", type=float, default=0.6, help="Total wait time for command responses.")
     parser.add_argument("--idle-timeout", type=float, default=0.08, help="Stop reading after this idle gap.")
     parser.add_argument("--read-startup", type=float, default=0.0, help="Read boot logs for this many seconds before sending.")
+    parser.add_argument(
+        "--recovery-timeout",
+        type=float,
+        default=1.5,
+        help="If a command gets no response, wait this long for startup logs and retry once.",
+    )
     parser.add_argument("--repeat", type=int, default=1, help="Repeat the same command multiple times.")
     parser.add_argument("--interval", type=float, default=0.0, help="Delay between repeated sends.")
     parser.add_argument("--expect", action="append", default=[], help="Require a response line containing this text.")
@@ -119,12 +157,13 @@ def main() -> int:
                         print(line)
 
             for attempt in range(1, args.repeat + 1):
-                used_command, responses = send_with_fallback(
+                used_command, responses, recovery_lines = send_with_recovery(
                     device,
                     command_candidates,
                     response_timeout=args.response_timeout,
                     idle_timeout=args.idle_timeout,
                     require_response=not args.allow_no_response,
+                    recovery_timeout=args.recovery_timeout,
                 )
 
                 if expected_responses:
@@ -132,6 +171,10 @@ def main() -> int:
 
                 command_label = primary_command if used_command == primary_command else f"{primary_command} (fallback {used_command})"
                 prefix = f">>> [{attempt}/{args.repeat}] {command_label}" if args.repeat > 1 else f">>> {command_label}"
+                if recovery_lines:
+                    print(">>> recovery")
+                    for line in recovery_lines:
+                        print(line)
                 print(prefix)
                 if responses:
                     for line in responses:

@@ -25,11 +25,13 @@ from pointer_host_logic import (
     MatchResult,
     apply_deadzone,
     bbox_center,
+    hold_angle_if_within_threshold,
     map_center_to_angle,
     match_target_bbox,
     should_send_angle,
     should_stop_for_loss,
     smooth_angle,
+    smooth_angle_adaptive,
     smooth_center,
 )
 from pointer_serial import PointerSerialClient, PointerSerialError
@@ -203,6 +205,7 @@ def draw_overlay(
     tracked_bbox: BBox | None,
     smoothed_target_center: tuple[float, float] | None,
     pending_detections: list[DetectionCandidate],
+    target_angle: int | None,
     sent_angle: int | None,
     missed_frames: int,
     on_loss: str,
@@ -221,8 +224,18 @@ def draw_overlay(
     cv2.putText(frame, f"missed_frames={missed_frames} on_loss={on_loss}", (10, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
     cv2.putText(frame, format_match_text(last_match, last_match_success), (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
-    if sent_angle is not None:
-        cv2.putText(frame, f"angle={sent_angle}", (10, 162), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+    if target_angle is not None or sent_angle is not None:
+        target_text = "—" if target_angle is None else str(target_angle)
+        output_text = "—" if sent_angle is None else str(sent_angle)
+        cv2.putText(
+            frame,
+            f"target_angle={target_text} output_angle={output_text}",
+            (10, 162),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 0),
+            2,
+        )
 
     for index, detection in enumerate(pending_detections, start=1):
         x, y, box_width, box_height = detection.bbox
@@ -264,11 +277,11 @@ def send_control_command(
     )
 
 
-def compute_servo_angle(
+def compute_target_servo_angle(
     smoothed_target_center: tuple[float, float],
     frame_width: int,
-    last_sent_angle: int | None,
     args: argparse.Namespace,
+    current_output_angle: int | None = None,
 ) -> int:
     raw_angle = map_center_to_angle(
         smoothed_target_center[0],
@@ -278,7 +291,26 @@ def compute_servo_angle(
         args.max_angle,
     )
     deadzoned_angle = apply_deadzone(raw_angle, args.center_angle, args.center_deadzone)
-    return smooth_angle(last_sent_angle, deadzoned_angle, args.smooth_step)
+    return hold_angle_if_within_threshold(current_output_angle, deadzoned_angle, args.angle_hold_threshold)
+
+
+def compute_servo_angle(
+    smoothed_target_center: tuple[float, float],
+    frame_width: int,
+    last_sent_angle: int | None,
+    args: argparse.Namespace,
+) -> int:
+    target_angle = compute_target_servo_angle(smoothed_target_center, frame_width, args, current_output_angle=last_sent_angle)
+    return smooth_angle_adaptive(
+        last_sent_angle,
+        target_angle,
+        args.center_angle,
+        args.angle_small_error_threshold,
+        args.angle_medium_error_threshold,
+        args.angle_small_step,
+        args.angle_medium_step,
+        args.angle_large_step,
+    )
 
 
 def attempt_match(
@@ -342,7 +374,13 @@ def main() -> int:
     parser.add_argument("--center-angle", type=int, default=90)
     parser.add_argument("--max-angle", type=int, default=160)
     parser.add_argument("--center-deadzone", type=int, default=2, help="Keep commands at center when within this many degrees.")
-    parser.add_argument("--smooth-step", type=int, default=4, help="Limit each update to this many degrees. Use 0 to disable.")
+    parser.add_argument("--smooth-step", type=int, default=4, help="Legacy fixed-step option. Kept for compatibility but not used by the default adaptive controller.")
+    parser.add_argument("--angle-small-error-threshold", type=int, default=4, help="Use the small step when angle error is within this range.")
+    parser.add_argument("--angle-medium-error-threshold", type=int, default=18, help="Use the medium step when angle error is within this range.")
+    parser.add_argument("--angle-small-step", type=int, default=1, help="Max per-update angle change for small errors.")
+    parser.add_argument("--angle-medium-step", type=int, default=3, help="Max per-update angle change for medium errors.")
+    parser.add_argument("--angle-large-step", type=int, default=6, help="Max per-update angle change for large errors.")
+    parser.add_argument("--angle-hold-threshold", type=int, default=2, help="Ignore target-angle jitter within this many degrees of the current output angle.")
     parser.add_argument("--angle-step-threshold", type=int, default=2, help="Only resend angle when the change is at least this many degrees.")
     parser.add_argument("--on-loss", choices=("stop", "center"), default="stop", help="Behavior after continuous target loss.")
     parser.add_argument("--verbose", action="store_true", help="Print host-side state transitions and commands.")
@@ -350,6 +388,16 @@ def main() -> int:
 
     if args.detect_every <= 0:
         parser.error("--detect-every must be positive")
+    if args.angle_small_error_threshold < 0:
+        parser.error("--angle-small-error-threshold must be non-negative")
+    if args.angle_medium_error_threshold < args.angle_small_error_threshold:
+        parser.error("--angle-medium-error-threshold must be >= --angle-small-error-threshold")
+    if min(args.angle_small_step, args.angle_medium_step, args.angle_large_step) <= 0:
+        parser.error("--angle-small-step, --angle-medium-step, and --angle-large-step must be positive")
+    if not args.angle_small_step <= args.angle_medium_step <= args.angle_large_step:
+        parser.error("--angle steps must satisfy small <= medium <= large")
+    if args.angle_hold_threshold < 0:
+        parser.error("--angle-hold-threshold must be non-negative")
 
     if args.list_cameras:
         camera_results = list_available_cameras(args.camera_scan_max_index, args.camera_backend)
@@ -405,6 +453,7 @@ def main() -> int:
     missed_frames = 0
     frame_index = 0
     force_detection = False
+    target_angle: int | None = None
 
     try:
         if args.verbose:
@@ -492,8 +541,15 @@ def main() -> int:
                             last_sent_angle = args.center_angle
                         if args.verbose and responses:
                             print(responses[-1])
+                        target_angle = args.center_angle if loss_command == "CENTER" else None
 
             if tracked_bbox is not None and smoothed_target_center is not None and (just_selected or state.last_match_success):
+                target_angle = compute_target_servo_angle(
+                    smoothed_target_center,
+                    frame.shape[1],
+                    args,
+                    current_output_angle=last_sent_angle,
+                )
                 angle = compute_servo_angle(smoothed_target_center, frame.shape[1], last_sent_angle, args)
                 if should_send_angle(last_sent_angle, angle, args.angle_step_threshold):
                     responses = send_control_command(
@@ -504,11 +560,15 @@ def main() -> int:
                         require_response=True,
                     )
                     last_sent_angle = angle
-                    if args.verbose and responses:
-                        print(responses[-1])
+                    if args.verbose:
+                        print(f"target_angle={target_angle} output_angle={angle}")
+                        if responses:
+                            print(responses[-1])
 
             if tracked_bbox is None and state.tracking_state != STATE_LOST:
                 state.tracking_state = STATE_SELECTING
+                if state.pending_selection is None:
+                    target_angle = None
 
             draw_overlay(
                 frame,
@@ -516,6 +576,7 @@ def main() -> int:
                 tracked_bbox=tracked_bbox,
                 smoothed_target_center=smoothed_target_center,
                 pending_detections=state.pending_detections,
+                target_angle=target_angle,
                 sent_angle=last_sent_angle,
                 missed_frames=missed_frames,
                 on_loss=args.on_loss,

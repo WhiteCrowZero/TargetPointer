@@ -16,7 +16,7 @@ def load_pointer_vision_app():
         CAP_MSMF=1400,
     )
     fake_ultralytics = types.SimpleNamespace(YOLO=object)
-    fake_serial = types.SimpleNamespace(SerialException=RuntimeError)
+    fake_serial = types.SimpleNamespace(SerialException=RuntimeError, Serial=object)
 
     original_modules = {
         "cv2": sys.modules.get("cv2"),
@@ -43,6 +43,44 @@ def load_pointer_vision_app():
 
 
 class PointerVisionAppTests(unittest.TestCase):
+    def test_compute_servo_angle_limits_initial_jump_from_center(self) -> None:
+        module = load_pointer_vision_app()
+        args = types.SimpleNamespace(
+            min_angle=20,
+            center_angle=90,
+            max_angle=160,
+            center_deadzone=2,
+            angle_hold_threshold=2,
+            angle_small_error_threshold=4,
+            angle_medium_error_threshold=18,
+            angle_small_step=1,
+            angle_medium_step=3,
+            angle_large_step=6,
+        )
+
+        angle = module.compute_servo_angle((0.0, 0.0), 640, 90, args)
+
+        self.assertEqual(angle, 84)
+
+    def test_compute_servo_angle_uses_smaller_steps_near_target(self) -> None:
+        module = load_pointer_vision_app()
+        args = types.SimpleNamespace(
+            min_angle=20,
+            center_angle=90,
+            max_angle=160,
+            center_deadzone=2,
+            angle_hold_threshold=2,
+            angle_small_error_threshold=4,
+            angle_medium_error_threshold=18,
+            angle_small_step=1,
+            angle_medium_step=3,
+            angle_large_step=6,
+        )
+
+        angle = module.compute_servo_angle((274.0, 0.0), 640, 82, args)
+
+        self.assertEqual(angle, 82)
+
     def test_attempt_match_falls_back_to_relaxed_reacquire(self) -> None:
         module = load_pointer_vision_app()
         args = types.SimpleNamespace(

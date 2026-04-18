@@ -48,6 +48,13 @@ TRACKING_TONES = {
 }
 
 
+def format_model_display_name(model_name: str) -> str:
+    normalized = model_name.replace("\\", "/").rstrip("/")
+    if not normalized:
+        return model_name
+    return normalized.split("/")[-1]
+
+
 def frame_to_qpixmap(frame) -> QtGui.QPixmap:
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     height, width, channels = rgb_frame.shape
@@ -436,7 +443,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
 
         self.backend_value = QtWidgets.QLabel(self.runtime.camera_backend_preference.upper())
         self.backend_value.setObjectName("InlineValue")
-        self.model_label = QtWidgets.QLabel(self.runtime.model_name)
+        self.model_label = QtWidgets.QLabel(format_model_display_name(self.runtime.model_name))
         self.model_label.setObjectName("InlineValue")
 
         form = QtWidgets.QGridLayout()
