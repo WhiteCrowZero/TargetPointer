@@ -178,6 +178,154 @@ class PointerRuntimeTests(unittest.TestCase):
         self.assertIn("BOOT", responses)
         self.assertIsNone(runtime.last_output_angle)
 
+    def test_center_device_waits_for_real_center_completion(self) -> None:
+        runtime = PointerRuntime(detector=object(), model_name="test-model")
+        runtime.serial_client = object()
+        runtime.serial_port = "COM4"
+        runtime.last_output_angle = 135
+        runtime.tracked_bbox = (10, 10, 50, 100)
+        runtime.state.tracking_state = pointer_runtime.STATE_LOCKED
+        runtime.tracking_indicator_active = True
+
+        original_send = pointer_runtime.send_control_command
+        commands: list[str] = []
+        try:
+            def fake_send(client, command, **kwargs):
+                commands.append(command)
+                if command == "STATUS?":
+                    return ["STATUS:ANGLE=135,TARGET=90,ATTACHED=1,LED=OFF,LAST=CENTER,RESULT=OK:CENTER"]
+                return [f"OK:{command}"]
+
+            pointer_runtime.send_control_command = fake_send
+            responses = runtime.center_device()
+        finally:
+            pointer_runtime.send_control_command = original_send
+
+        self.assertEqual(commands, ["CENTER", "STATUS?", "LED:OFF"])
+        self.assertEqual(responses[0], "OK:CENTER")
+        self.assertTrue(runtime.center_pending)
+        self.assertEqual(runtime.state.tracking_state, pointer_runtime.STATE_CENTERING)
+        self.assertEqual(runtime.last_output_angle, 135)
+        self.assertEqual(runtime.last_target_angle, 90)
+
+    def test_process_next_frame_does_not_send_angle_while_centering(self) -> None:
+        runtime = PointerRuntime(detector=object(), model_name="test-model", detect_every=10)
+        fake_frame = type("FakeFrame", (), {"shape": (480, 640, 3)})()
+        runtime.capture = type("FakeCapture", (), {"read": lambda self: (True, fake_frame), "release": lambda self: None})()
+        runtime._run_detection_cycle = lambda frame: None
+        runtime.serial_client = object()
+        runtime.serial_port = "COM4"
+        runtime.center_pending = True
+        runtime.center_pending_final_state = pointer_runtime.STATE_SELECTING
+        runtime.state.tracking_state = pointer_runtime.STATE_CENTERING
+        runtime.state.pending_selection = (10, 10, 50, 100)
+        runtime.last_output_angle = 135
+        runtime.last_target_angle = 90
+
+        original_send = pointer_runtime.send_control_command
+        commands: list[str] = []
+        try:
+            def fake_send(client, command, **kwargs):
+                commands.append(command)
+                if command == "STATUS?":
+                    return ["STATUS:ANGLE=120,TARGET=90,ATTACHED=1,LED=OFF,LAST=CENTER,RESULT=OK:CENTER"]
+                return [f"OK:{command}"]
+
+            pointer_runtime.send_control_command = fake_send
+            snapshot = runtime.process_next_frame()
+        finally:
+            pointer_runtime.send_control_command = original_send
+
+        self.assertEqual(commands, ["STATUS?"])
+        self.assertEqual(snapshot.tracking_state, pointer_runtime.STATE_CENTERING)
+        self.assertTrue(runtime.center_pending)
+        self.assertEqual(snapshot.output_angle, 120)
+        self.assertEqual(runtime.state.pending_selection, (10, 10, 50, 100))
+
+    def test_disconnect_serial_parks_center_before_closing(self) -> None:
+        runtime = PointerRuntime(
+            detector=object(),
+            model_name="test-model",
+            shutdown_center_timeout=0.01,
+            shutdown_poll_interval=0.0,
+        )
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        client = FakeClient()
+        runtime.serial_client = client
+        runtime.serial_port = "COM4"
+        runtime.tracked_bbox = (10, 10, 50, 100)
+        runtime.state.tracking_state = pointer_runtime.STATE_LOCKED
+
+        original_send = pointer_runtime.send_control_command
+        original_sleep = pointer_runtime.time.sleep
+        status_payloads = iter(
+            [
+                ["STATUS:ANGLE=135,TARGET=135,ATTACHED=1,LED=ON,LAST=ANGLE,RESULT=OK:ANGLE"],
+                ["STATUS:ANGLE=90,TARGET=90,ATTACHED=1,LED=OFF,LAST=CENTER,RESULT=OK:CENTER"],
+            ]
+        )
+        commands: list[str] = []
+
+        try:
+            pointer_runtime.time.sleep = lambda _seconds: None
+
+            def fake_send(client_arg, command, **kwargs):
+                commands.append(command)
+                if command == "STATUS?":
+                    return next(status_payloads)
+                return [f"OK:{command}"]
+
+            pointer_runtime.send_control_command = fake_send
+            runtime.disconnect_serial()
+        finally:
+            pointer_runtime.send_control_command = original_send
+            pointer_runtime.time.sleep = original_sleep
+
+        self.assertEqual(commands, ["STATUS?", "LED:OFF", "CENTER", "STATUS?", "STOP"])
+        self.assertTrue(client.closed)
+        self.assertIsNone(runtime.serial_client)
+        self.assertEqual(runtime.state.tracking_state, pointer_runtime.STATE_SELECTING)
+
+    def test_disconnect_serial_does_not_center_when_servo_is_unattached(self) -> None:
+        runtime = PointerRuntime(detector=object(), model_name="test-model")
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        client = FakeClient()
+        runtime.serial_client = client
+        runtime.serial_port = "COM4"
+
+        original_send = pointer_runtime.send_control_command
+        commands: list[str] = []
+
+        try:
+            def fake_send(client_arg, command, **kwargs):
+                commands.append(command)
+                if command == "STATUS?":
+                    return ["STATUS:ANGLE=90,TARGET=90,ATTACHED=0,LED=OFF,LAST=BOOT,RESULT=OK:IDLE"]
+                return [f"OK:{command}"]
+
+            pointer_runtime.send_control_command = fake_send
+            runtime.disconnect_serial()
+        finally:
+            pointer_runtime.send_control_command = original_send
+
+        self.assertEqual(commands, ["STATUS?", "LED:OFF", "STOP"])
+        self.assertTrue(client.closed)
+        self.assertIsNone(runtime.serial_client)
+
 
 if __name__ == "__main__":
     unittest.main()

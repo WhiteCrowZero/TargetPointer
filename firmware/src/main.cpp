@@ -21,9 +21,6 @@ bool g_tracking_led_on = false;
 bool g_servo_attached = false;
 unsigned long g_last_servo_step_ms = 0;
 
-constexpr std::int16_t k_servo_step_deg = 2;
-constexpr unsigned long k_servo_step_interval_ms = 20;
-
 void write_tracking_led(bool on) {
     g_tracking_led_on = on;
     digitalWrite(
@@ -57,7 +54,7 @@ void set_servo_target(std::int16_t angle_deg) {
 
 void update_servo_motion() {
     const unsigned long now = millis();
-    if (now - g_last_servo_step_ms < k_servo_step_interval_ms) {
+    if (now - g_last_servo_step_ms < targetpointer::config::k_servo_step_interval_ms) {
         return;
     }
     g_last_servo_step_ms = now;
@@ -68,12 +65,12 @@ void update_servo_motion() {
 
     std::int16_t next_angle = g_current_angle;
     if (g_target_angle > g_current_angle) {
-        next_angle = static_cast<std::int16_t>(g_current_angle + k_servo_step_deg);
+        next_angle = static_cast<std::int16_t>(g_current_angle + targetpointer::config::k_servo_step_deg);
         if (next_angle > g_target_angle) {
             next_angle = g_target_angle;
         }
     } else {
-        next_angle = static_cast<std::int16_t>(g_current_angle - k_servo_step_deg);
+        next_angle = static_cast<std::int16_t>(g_current_angle - targetpointer::config::k_servo_step_deg);
         if (next_angle < g_target_angle) {
             next_angle = g_target_angle;
         }

@@ -1,38 +1,40 @@
 # Scripts
 
-本目录保存当前唯一上位机控制通路的脚本，默认围绕“视觉 + 串口 + 固件”工作。
+本目录只保留当前上位机的薄入口脚本和兼容导入层。实际实现位于仓库根目录的 `targetpointer/` 包。Windows 是默认运行环境。
 
-## 模块职责
+## 入口
 
-- `pointer_serial.py`
-  串口通信、命令发送、响应读取、状态查询。
-- `pointer_host_logic.py`
-  目标水平偏移到控制量的映射、死区、自适应分段限速、最小发送阈值、丢失策略等纯逻辑。
-- `pointer_runtime.py`
-  上位机运行时控制层，负责摄像头、YOLO、目标维护、串口和状态快照。
-- `pointer_vision_app.py`
-  摄像头读取、YOLO 推理、目标选择、可视化、串口联动。
 - `pointer_desktop_app.py`
-  Windows 优先的桌面应用入口，提供视频舞台、右侧操作面板、默认隐藏的活动日志弹层，以及独立的 Insights 分析页。
+  默认演示入口。启动工作台主页，并从主页打开 `Live Control`、`Voice Assistant`、`Target Report` 和 `Data Analysis` 独立窗口。
+- `pointer_vision_app.py`
+  调试入口。更适合验证摄像头、识别和串口链路。
 - `pointer_serial_cli.py`
-  手动串口调试工具，用于固件联调和协议验证。
+  串口协议联调工具。
+- `pointer_voice_agent.py`
+  LiveKit Agents 语音助手 worker。语音助手窗口会自动启动它，通常不需要手动运行。
 
-## 安装
+## 核心模块位置
+
+- `targetpointer/runtime/runtime.py`
+  管理摄像头、检测、目标维护、串口和状态快照。
+- `targetpointer/runtime/host_logic.py`
+  纯控制逻辑，包括偏移映射、死区、分段限速和丢失策略。
+- `targetpointer/runtime/serial.py`
+  串口发送、响应读取和状态查询封装。
+- `targetpointer/reporting/report.py`
+  选中人物截图、OpenAI 视觉分析和 PDF 报告生成。
+- `targetpointer/ui/launcher.py`
+  工作台启动器主页。
+- `targetpointer/ui/desktop_app.py`
+  PySide 主控台、报告、语音助手和数据分析窗口。
+
+## 依赖安装
 
 ```bash
 uv sync
 ```
 
-当前脚本依赖只围绕：
-
-- `opencv-python`
-- `PySide6`
-- `ultralytics`
-- `pyserial`
-
-不需要安装任何与当前主线无关的额外输入系统库。
-
-## 快速使用
+## 常用命令
 
 串口联调：
 
@@ -43,63 +45,56 @@ uv run python scripts/pointer_serial_cli.py --port COM5 center
 uv run python scripts/pointer_serial_cli.py --port COM5 angle 120
 ```
 
-启动视觉主线：
+启动桌面端工作台：
 
 ```bash
-uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --model yolov8n.pt --verbose
+uv run python scripts/pointer_desktop_app.py --port COM4 --camera 0 --camera-backend msmf --model yolov8n.pt
 ```
 
-启动桌面上位机：
+报告与语音助手会从仓库根目录 `.env` 读取云端配置。留空的模板如下，实际值由操作者在 Windows 工作区填写：
 
 ```bash
-uv run python scripts/pointer_desktop_app.py --model yolov8n.pt
+OPENAI_API_KEY=
+ELEVEN_API_KEY=
+LIVEKIT_URL=
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=
+TARGETPOINTER_REPORT_MODEL=
+TARGETPOINTER_VOICE_LLM_MODEL=
+TARGETPOINTER_VOICE_TEMPERATURE=
+TARGETPOINTER_VOICE_MAX_OUTPUT_TOKENS=
+TARGETPOINTER_STT_MODEL=
+TARGETPOINTER_STT_LANGUAGE=
+TARGETPOINTER_TTS_MODEL=
+TARGETPOINTER_TTS_VOICE=
+TARGETPOINTER_TTS_SPEED=
 ```
 
-如果你已经知道摄像头和串口，优先直接通过参数传入，避免启动时探测：
-
-```bash
-uv run python scripts/pointer_desktop_app.py --port COM4 --camera 2 --camera-backend msmf --model yolov8n.pt
-```
-
-Windows 下如果默认摄像头打开失败，可先扫描可用索引：
-
-```bash
-uv run python scripts/pointer_vision_app.py --list-cameras
-```
-
-也可以显式指定 backend：
+启动命令行视觉调试：
 
 ```bash
 uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --camera-backend msmf --model yolov8n.pt --verbose
 ```
 
-## 当前完成度
+列出摄像头：
 
-- 已完成：
-  YOLO 人物检测初始化、单目标重关联、桌面端 UI、点击选人、手动框选、串口联动、自适应分段限速角度控制。
-- 仍待实机验证：
-  独立 5V 条件下的舵机速度/抖动/安全角度标定。
+```bash
+uv run python scripts/pointer_vision_app.py --list-cameras
+```
 
-## 交互约定
+## 当前桌面端交互约定
 
-- 运行后默认打开实时画面窗口。
-- 空闲状态下会显示 YOLO 检测到的人物框。
-- 鼠标左键点击某个人物框可开始跟踪。
-- 在桌面端视频区拖一个框，也可以手动指定初始化区域。
-- 按 `r` 可手动框选人物区域。
-- 按 `d` 可强制刷新一次 YOLO 检测。
-- 按 `c` 回中，按 `x` 停止，按 `q` 退出。
+- 启动后先进入工作台主页，四个主要页面都是独立窗口。
+- `Live Control` 会持续显示下一步推荐操作，不适合当前状态的按钮会自动禁用。
+- 支持点击检测框和拖框初始化两种方式。
+- 失败时会显示 5 秒左右的短暂错误提示，详细信息继续写入 `Activity`。
+- `Data Analysis` 是独立窗口，用于查看角度、检测数量和匹配质量等趋势。
+- `Target Report` 仅在摄像头已打开且当前人物处于锁定或重关联状态时可生成报告。
+- `Voice Assistant` 打开独立展示窗口，支持配置 ElevenLabs STT、LLM 温度、TTS 音色/速度和查看交互动画；真实房间连接、麦克风和扬声器链路需要在 Windows 环境验证。
 
-## 调试说明
+## 协议与运行时说明
 
-- `pointer_serial_cli.py` 会校验固件返回，收到 `ERR:*` 或无响应时以非零状态退出。
-- `pointer_serial_cli.py` 的 `status` 子命令会先发 `STATUS?`，旧固件若返回 `ERR:BAD_CMD` 会自动回退到 `STATUS`。
-- `pointer_desktop_app.py` 是首选演示入口；它不会在启动时自动扫摄像头，优先使用 `--camera` 和 `--camera-backend`。
-- `pointer_desktop_app.py` 支持点击检测框和拖框初始化两种交互。
-- 桌面端活动日志默认隐藏，通过窗口右上角 `Activity` 按钮展开。
-- `Insights` 会打开独立分析窗口，用于查看 `target_angle`、`output_angle`、检测数量和匹配质量的短时趋势。
-- `pointer_vision_app.py` 继续保留为算法和摄像头调试入口。
-- `pointer_vision_app.py` 启动时会先读取固件启动日志，再发送 `STATUS?` 做链路确认，不主动触发回中。
-- Windows 下 `pointer_vision_app.py` 默认会依次尝试 `msmf`、`dshow`、`any` 三种摄像头 backend。
-- 角度控制当前采用“目标角 + 分段限速输出角”，大偏差时不会直接猛跳到目标角。
-- 目标连续丢失若干帧后，程序会按配置执行 `STOP` 或 `CENTER`，避免舵机持续乱动。
+- 启动或重连后，运行时会查询 `STATUS?` 以同步真实设备状态。
+- `status` 命令会优先发送 `STATUS?`，旧固件若返回 `ERR:BAD_CMD` 会回退到 `STATUS`。
+- 角度控制采用“目标角 + 分段限速输出角”。
+- 目标连续丢失若干帧后，程序会按配置执行 `STOP` 或 `CENTER`。

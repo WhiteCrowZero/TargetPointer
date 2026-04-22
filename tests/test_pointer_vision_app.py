@@ -93,12 +93,80 @@ class PointerVisionAppTests(unittest.TestCase):
 
         match, used_relaxed = module.attempt_match(
             (100, 100, 50, 100),
-            [(150, 110, 55, 105)],
+            [(140, 110, 55, 105)],
             args,
         )
 
         self.assertIsNotNone(match)
         self.assertTrue(used_relaxed)
+
+    def test_attempt_match_rejects_relaxed_candidate_with_zero_iou(self) -> None:
+        module = load_pointer_vision_app()
+        args = types.SimpleNamespace(
+            match_min_iou=0.2,
+            match_max_center_ratio=1.0,
+            match_max_area_change=0.5,
+            reacquire_center_ratio_multiplier=3.0,
+            reacquire_area_change_multiplier=3.0,
+        )
+
+        match, used_relaxed = module.attempt_match(
+            (100, 100, 50, 100),
+            [(150, 110, 55, 105)],
+            args,
+        )
+
+        self.assertIsNone(match)
+        self.assertFalse(used_relaxed)
+
+    def test_update_angles_from_status_fields_uses_attached_status(self) -> None:
+        module = load_pointer_vision_app()
+
+        output_angle, target_angle, attached = module.update_angles_from_status_fields(
+            {"ANGLE": "135", "TARGET": "120", "ATTACHED": "1"},
+            current_output_angle=None,
+            current_target_angle=None,
+        )
+
+        self.assertTrue(attached)
+        self.assertEqual(output_angle, 135)
+        self.assertEqual(target_angle, 120)
+
+    def test_safe_shutdown_serial_centers_then_stops_when_attached(self) -> None:
+        module = load_pointer_vision_app()
+        original_send = module.send_control_command
+        original_sleep = module.time.sleep
+        commands: list[str] = []
+        status_payloads = iter(
+            [
+                ["STATUS:ANGLE=135,TARGET=135,ATTACHED=1,LED=ON,LAST=ANGLE,RESULT=OK:ANGLE"],
+                ["STATUS:ANGLE=90,TARGET=90,ATTACHED=1,LED=OFF,LAST=CENTER,RESULT=OK:CENTER"],
+            ]
+        )
+
+        try:
+            module.time.sleep = lambda _seconds: None
+
+            def fake_send(serial_client, command, **kwargs):
+                commands.append(command)
+                if command == "STATUS?":
+                    return next(status_payloads)
+                return [f"OK:{command}"]
+
+            module.send_control_command = fake_send
+            module.safe_shutdown_serial(
+                object(),
+                center_angle=90,
+                response_timeout=0.25,
+                idle_timeout=0.05,
+                settle_timeout=0.01,
+                poll_interval=0.0,
+            )
+        finally:
+            module.send_control_command = original_send
+            module.time.sleep = original_sleep
+
+        self.assertEqual(commands, ["STATUS?", "LED:OFF", "CENTER", "STATUS?", "STOP"])
 
     def test_build_camera_candidates_prefers_windows_backends_for_indices(self) -> None:
         module = load_pointer_vision_app()

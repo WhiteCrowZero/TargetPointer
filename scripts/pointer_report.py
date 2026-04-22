@@ -3,6 +3,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from targetpointer.runtime import serial as _module
+from targetpointer.reporting import report as _module
 
 sys.modules[__name__] = _module

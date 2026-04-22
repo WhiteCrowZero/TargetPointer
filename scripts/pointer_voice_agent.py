@@ -6,10 +6,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 if __name__ == "__main__":
-    from targetpointer.runtime.serial_cli import main
+    from targetpointer.voice.agent import main
 
     raise SystemExit(main())
 
-from targetpointer.runtime import serial_cli as _module
+from targetpointer.voice import agent as _module
 
 sys.modules[__name__] = _module

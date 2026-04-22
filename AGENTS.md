@@ -42,5 +42,8 @@ Write firmware in Arduino-style C/C++ with 4-space indentation and UTF-8 source 
 ## Testing Guidelines
 Add tests with each new behavior. Put pure logic tests beside the firmware in `firmware/test/`, and name files after the module under test, for example `test_pointer_protocol.cpp`. For hardware-dependent work, record the setup, board revision, Windows host environment, and observed result in `docs/硬件调试记录.md`. Validate at least command parsing, serial responses, and servo angle bounds. Treat WSL-only verification as incomplete for any feature that depends on serial ports, cameras, GUI windows, upload flows, or other directly attached devices.
 
+## Code Review Reporting
+When the user asks for a code review, default to reporting findings with `P0`, `P1`, `P2`, `P3` style priority levels rather than generic severity labels. Unless the user explicitly asks otherwise, focus the main review conclusion on functional issues only, especially algorithm/control problems, error-handling flaws, and safety boundaries that affect correctness or device behavior. Keep non-functional style, readability, or architecture suggestions out of the main findings list unless they directly cause a functional risk.
+
 ## Commit & Pull Request Guidelines
 Use short imperative commit messages such as `Add Blue Pill serial servo firmware` or `Document host vision workflow`. Keep commits focused. Pull requests should summarize the hardware or firmware change, list test evidence, link related issues or design notes, and include photos, logs, or serial output when behavior changes on real hardware.
