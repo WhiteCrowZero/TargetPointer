@@ -56,19 +56,24 @@ uv run python scripts/pointer_desktop_app.py --camera 0 --camera-backend msmf --
 - `Live Control` 持续提示下一步推荐操作，不适合当前状态的按钮会自动禁用。
 - 失败操作会弹出短暂错误提示，详细记录保留在 `Activity`。
 - `目标报告` 可在目标锁定后生成中文 `reports/YYYYMMDD_HHMMSS_target_report.pdf`，内容包含环境、穿着、姿态、活动和不确定性。
-- `AI 实时对话` 由 LiveKit worker 接入实时房间，不保存语音文件；内部使用 `Silero VAD -> OpenAI STT -> OpenAI LLM -> ElevenLabs TTS` pipeline，方便定制音色；界面包含用户麦克风静音、波形状态和字幕滚动区。
+- `AI 实时对话` 现在只保留 `RealtimeAIChat` 后端这一条路径。TargetPointer 负责调用后端会话 API、连接 LiveKit、采集麦克风、播放 AI 音频和展示实时字幕；不再自己启动本地 worker，也不再生成手动命令。
 
-云端报告和语音助手需要在仓库根目录 `.env` 中填写：
+仓库根目录 `.env` 中至少需要填写：
 
 ```bash
 OPENAI_API_KEY=
-ELEVEN_API_KEY=
-LIVEKIT_URL=
-LIVEKIT_API_KEY=
-LIVEKIT_API_SECRET=
+REALTIME_CHAT_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-可选模型覆盖项也在 `.env` 中，留空时使用默认值。
+其中 `OPENAI_API_KEY` 用于报告；语音默认通过 `RealtimeAIChat` 后端处理，TargetPointer 只需要知道 API 基地址。
+
+语音启动流程：
+
+1. 先启动 `RealtimeAIChat` 的 API、worker 和 LiveKit。
+2. 在 TargetPointer 的 `.env` 里设置 `REALTIME_CHAT_API_BASE_URL`。
+3. 启动桌面端，进入 `AI 实时对话`。
+4. 点击 `启动会话`，桌面端会自动创建 session、连接 LiveKit 并开始收发字幕和音频。
+5. 不需要手动启动 worker，也不需要额外打开外部客户端。
 
 ## 调试入口
 

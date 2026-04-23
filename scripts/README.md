@@ -10,8 +10,6 @@
   调试入口。更适合验证摄像头、识别和串口链路。
 - `pointer_serial_cli.py`
   串口协议联调工具。
-- `pointer_voice_agent.py`
-  LiveKit Agents 语音助手 worker。桌面端会自动启动它，通常不需要手动运行；独立调试时可手动运行 `dev`。
 
 ## 核心模块位置
 
@@ -61,27 +59,12 @@ uv run python scripts/pointer_desktop_app.py --camera 0 --camera-backend msmf --
 
 桌面端下拉框默认显示 `COM4`，但只有显式传 `--port COMx` 或 `--auto-connect` 时才会启动即连接串口。
 
-报告与语音助手会从仓库根目录 `.env` 读取云端配置。留空的模板如下，实际值由操作者在 Windows 工作区填写：
+报告与语音会从仓库根目录 `.env` 读取配置。报告需要 `OPENAI_API_KEY`；语音客户端只需要 `REALTIME_CHAT_API_BASE_URL` 去访问 `RealtimeAIChat` 后端。留空模板如下，实际值由操作者在 Windows 工作区填写：
 
 ```bash
 OPENAI_API_KEY=
-ELEVEN_API_KEY=
-LIVEKIT_URL=
-LIVEKIT_API_KEY=
-LIVEKIT_API_SECRET=
+REALTIME_CHAT_API_BASE_URL=http://127.0.0.1:8000
 TARGETPOINTER_REPORT_MODEL=
-TARGETPOINTER_VOICE_LLM_MODEL=
-TARGETPOINTER_VOICE_TEMPERATURE=
-TARGETPOINTER_VOICE_MAX_OUTPUT_TOKENS=
-TARGETPOINTER_STT_MODEL=
-TARGETPOINTER_STT_LANGUAGE=
-TARGETPOINTER_TTS_MODEL=
-TARGETPOINTER_TTS_VOICE=
-TARGETPOINTER_TTS_SPEED=
-TARGETPOINTER_ELEVEN_STABILITY=
-TARGETPOINTER_ELEVEN_SIMILARITY_BOOST=
-TARGETPOINTER_VAD_ACTIVATION_THRESHOLD=
-TARGETPOINTER_VAD_SILENCE_DURATION_MS=
 ```
 
 启动命令行视觉调试：
@@ -106,7 +89,7 @@ uv run python scripts/pointer_vision_app.py --list-cameras
 - 失败时会显示 5 秒左右的短暂错误提示，详细信息继续写入 `Activity`。
 - `Data Analysis` 是独立窗口，用于查看角度、检测数量和匹配质量等趋势。
 - `Target Report` 仅在摄像头已打开且当前人物处于锁定或重关联状态时可生成报告。
-- `AI 实时对话` 使用 LiveKit worker pipeline，按 `Silero VAD -> OpenAI STT -> OpenAI LLM -> ElevenLabs TTS` 拼接，方便单独调音色、转写模型和提示词；界面会显示用户静音开关、实时字幕和状态动画。真实房间连接、麦克风和扬声器链路需要在 Windows 环境验证。
+- `AI 实时对话` 只保留 `RealtimeAIChat` 后端对接方案。桌面端会调用 `/v2/sessions` 创建会话、自动连接 LiveKit，并展示实时字幕、系统日志和静音控制；不再提供本地 worker 启动命令。
 
 ## 协议与运行时说明
 

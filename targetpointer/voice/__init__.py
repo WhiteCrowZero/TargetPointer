@@ -1,2 +1,1 @@
-"""Voice assistant services and LiveKit worker entrypoint."""
-
+"""Voice assistant client-side helpers."""

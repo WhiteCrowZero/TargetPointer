@@ -9,10 +9,8 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import time
-from typing import IO
 
 try:
     import cv2
@@ -40,36 +38,34 @@ import serial
 from dotenv import load_dotenv
 
 from targetpointer.runtime.runtime import PointerRuntime, RuntimeSnapshot, list_serial_ports
+from targetpointer.ui.realtime_chat import (
+    DEFAULT_TARGETPOINTER_USER_IDENTITY,
+    RealtimeChatApiClient,
+    RealtimeChatApiError,
+    RealtimeVoiceConfig,
+    RealtimeVoiceSessionConfig,
+    build_realtime_voice_session_payload,
+    format_voice_session_details,
+    realtime_chat_api_base_url,
+)
+from targetpointer.ui.voice_client import DesktopLiveKitClientThread
 from targetpointer.reporting.report import (
     GeneratedReport,
     ReportStatus,
     build_report_images,
     default_report_path,
+    encode_jpeg,
     generate_target_report_pdf,
+    jpeg_data_url,
     request_target_report_analysis,
 )
-from targetpointer.voice.agent import (
-    DEFAULT_CONTROL_STORE,
-    DEFAULT_FRAME_STORE,
-    DEFAULT_STATUS_STORE,
-    DEFAULT_TRANSCRIPT_STORE,
-    clear_voice_transcript,
-    load_voice_status,
-    load_voice_transcript_lines,
-    missing_voice_env_vars,
-    should_sample_frame,
-    voice_config_defaults_from_env,
-    write_voice_control,
-    write_voice_status,
-    write_latest_voice_frame,
-)
-from targetpointer.voice.agent import DEFAULT_TTS_SPEED, VoiceAssistantConfig
 from targetpointer.voice.voices import voice_choices
 
 
 WINDOW_TITLE = "TargetPointer Console"
 WINDOW_ICON_TEXT = "➜"
 INSIGHTS_ICON_TEXT = "↗"
+VOICE_IMAGE_ATTACHMENT_LIMIT = 3
 
 TRACKING_LABELS = {
     "selecting": "Selecting",
@@ -135,6 +131,13 @@ def configure_combo_box(combo: QtWidgets.QComboBox, *, min_popup_width: int = 26
     combo.setItemDelegate(ComboItemDelegate(combo))
 
 
+def repolish_widget(widget: QtWidgets.QWidget) -> None:
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+    widget.update()
+
+
 @dataclass(frozen=True)
 class DesktopButtonState:
     open_camera_enabled: bool
@@ -154,6 +157,20 @@ class DesktopFlowState:
     tone: str
 
 
+@dataclass(frozen=True)
+class VoiceTranscriptLine:
+    timestamp: str
+    role: str
+    text: str
+
+
+@dataclass(frozen=True)
+class VoiceImageSnapshot:
+    captured_at: float
+    captured_at_label: str
+    frame: object
+
+
 def format_model_display_name(model_name: str) -> str:
     normalized = model_name.replace("\\", "/").rstrip("/")
     if not normalized:
@@ -167,6 +184,11 @@ def format_metric(value: int | float | None, precision: int = 0) -> str:
     if isinstance(value, float):
         return f"{value:.{precision}f}"
     return str(value)
+
+
+def format_voice_timestamp(moment: datetime | None = None) -> str:
+    active_moment = moment or datetime.now()
+    return active_moment.strftime("%Y-%m-%d %H:%M")
 
 
 @dataclass(frozen=True)
@@ -838,8 +860,8 @@ class ReportWindow(QtWidgets.QWidget):
             QFrame#ReportHeader,
             QFrame#ReportSection {
                 background: rgba(255, 255, 255, 188);
-                border: 1px solid rgba(147, 197, 253, 135);
-                border-radius: 22px;
+                border: none;
+                border-radius: 24px;
             }
             QLabel#ReportTitle {
                 font-size: 24px;
@@ -854,8 +876,8 @@ class ReportWindow(QtWidgets.QWidget):
             QLabel#ReportImage {
                 background: #08243d;
                 color: #eaf5ff;
-                border: 1px solid rgba(147, 197, 253, 150);
-                border-radius: 22px;
+                border: none;
+                border-radius: 24px;
                 padding: 8px;
             }
             QScrollArea#ReportScroll {
@@ -873,19 +895,19 @@ class ReportWindow(QtWidgets.QWidget):
                 line-height: 1.55;
             }
             QPushButton {
-                border-radius: 14px;
+                border-radius: 18px;
                 padding: 10px 18px;
                 font-weight: 700;
             }
             QPushButton#PrimaryButton {
                 background: #1d73d4;
                 color: #ffffff;
-                border: 1px solid #1d73d4;
+                border: none;
             }
             QPushButton:disabled {
                 background: rgba(219, 234, 254, 130);
                 color: #8aaac8;
-                border: 1px solid rgba(191, 219, 254, 150);
+                border: none;
             }
             QScrollBar:vertical {
                 background: rgba(219, 237, 255, 115);
@@ -973,13 +995,18 @@ class VoiceWaveform(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         rect = self.rect().adjusted(2, 2, -2, -2)
-        painter.setPen(QtGui.QPen(QtGui.QColor("#d8e0eb"), 1))
+        painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor("#f8fbff"))
         painter.drawRoundedRect(rect, 22, 22)
 
         active = self.state in {"listening", "thinking", "speaking"} and not self.muted
         base_color = QtGui.QColor("#0d9488" if self.tone == "user" else "#2563eb")
         muted_color = QtGui.QColor("#aab6c8" if not self.muted else "#d16b6b")
+        if self.state == "speaking":
+            glow_color = QtGui.QColor(base_color)
+            glow_color.setAlpha(42)
+            painter.setBrush(glow_color)
+            painter.drawRoundedRect(rect.adjusted(8, 10, -8, -10), 20, 20)
         bar_width = 12
         gap = 9
         total_width = len(self.pattern) * bar_width + (len(self.pattern) - 1) * gap
@@ -988,7 +1015,18 @@ class VoiceWaveform(QtWidgets.QWidget):
 
         for index, factor in enumerate(self.pattern):
             wave = 0.5 + 0.5 * abs(((self.phase + index * 7) % 24) - 12) / 12
-            multiplier = 0.18 if self.muted else 0.55 if self.state == "idle" else 0.82 if self.state != "speaking" else 1.05 + wave * 0.42
+            if self.muted:
+                multiplier = 0.12
+            elif self.state == "idle":
+                multiplier = 0.38 + wave * 0.08
+            elif self.state == "listening":
+                multiplier = 0.78 + wave * 0.18
+            elif self.state == "thinking":
+                multiplier = 0.92 + wave * 0.24
+            elif self.state == "speaking":
+                multiplier = 1.08 + wave * 0.5
+            else:
+                multiplier = 0.72 + wave * 0.12
             height = int((38 + factor * 72) * multiplier)
             x = int(start_x + index * (bar_width + gap))
             y = bottom - height
@@ -1016,7 +1054,19 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         self.animation_timer.start()
 
     def _build_ui(self) -> None:
-        root = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("VoiceScrollArea")
+        scroll.setWidgetResizable(True)
+        outer.addWidget(scroll)
+
+        content = QtWidgets.QWidget()
+        scroll.setWidget(content)
+
+        root = QtWidgets.QVBoxLayout(content)
         root.setContentsMargins(24, 22, 24, 22)
         root.setSpacing(16)
 
@@ -1028,7 +1078,7 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         title_stack.setSpacing(2)
         title = QtWidgets.QLabel("AI 实时对话")
         title.setObjectName("VoiceTitle")
-        self.detail_label = QtWidgets.QLabel("启动后由 LiveKit worker 接入实时房间，字幕在下方滚动显示。")
+        self.detail_label = QtWidgets.QLabel("启动后会检查 RealtimeAIChat 后端，并自动创建语音会话。")
         self.detail_label.setObjectName("VoiceSubtitle")
         title_stack.addWidget(title)
         title_stack.addWidget(self.detail_label)
@@ -1054,23 +1104,59 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         transcript_header.setSpacing(10)
         transcript_label = QtWidgets.QLabel("实时字幕")
         transcript_label.setObjectName("VoiceChannelTitle")
-        self.mute_checkbox = QtWidgets.QCheckBox("静音用户麦克风")
-        self.mute_checkbox.setObjectName("VoiceMuteCheck")
-        self.mute_checkbox.toggled.connect(self.mute_changed.emit)
         transcript_header.addWidget(transcript_label)
         transcript_header.addStretch(1)
-        transcript_header.addWidget(self.mute_checkbox)
 
         self.transcript_log = QtWidgets.QPlainTextEdit()
         self.transcript_log.setObjectName("VoiceTranscriptLog")
         self.transcript_log.setReadOnly(True)
-        self.transcript_log.setMaximumBlockCount(160)
+        self.transcript_log.setMaximumBlockCount(220)
+        self.transcript_log.setMinimumHeight(360)
         self.transcript_log.setPlaceholderText("实时字幕会显示在这里。")
-        self.transcript_log.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
-        self.transcript_log.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.transcript_log.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
         stage_layout.addLayout(transcript_header)
         stage_layout.addWidget(self.transcript_log, stretch=1)
+
+        handoff = QtWidgets.QFrame()
+        handoff.setObjectName("VoiceHandoff")
+        handoff_layout = QtWidgets.QHBoxLayout(handoff)
+        handoff_layout.setContentsMargins(18, 16, 18, 16)
+        handoff_layout.setSpacing(12)
+
+        session_card = QtWidgets.QFrame()
+        session_card.setObjectName("VoiceFooterCard")
+        session_layout = QtWidgets.QVBoxLayout(session_card)
+        session_layout.setContentsMargins(0, 0, 0, 0)
+        session_layout.setSpacing(10)
+        session_label = QtWidgets.QLabel("会话摘要")
+        session_label.setObjectName("VoiceChannelTitle")
+        self.session_info = QtWidgets.QPlainTextEdit()
+        self.session_info.setObjectName("VoiceSessionInfo")
+        self.session_info.setReadOnly(True)
+        self.session_info.setMinimumHeight(104)
+        self.session_info.setMaximumHeight(132)
+        self.session_info.setPlaceholderText("启动后会显示后端地址、session、room 和连接状态。")
+        session_layout.addWidget(session_label)
+        session_layout.addWidget(self.session_info)
+
+        event_card = QtWidgets.QFrame()
+        event_card.setObjectName("VoiceFooterCard")
+        event_layout = QtWidgets.QVBoxLayout(event_card)
+        event_layout.setContentsMargins(0, 0, 0, 0)
+        event_layout.setSpacing(10)
+        event_label = QtWidgets.QLabel("系统日志")
+        event_label.setObjectName("VoiceChannelTitle")
+        self.event_log = QtWidgets.QPlainTextEdit()
+        self.event_log.setObjectName("VoiceEventLog")
+        self.event_log.setReadOnly(True)
+        self.event_log.setMaximumBlockCount(120)
+        self.event_log.setMinimumHeight(104)
+        self.event_log.setMaximumHeight(132)
+        self.event_log.setPlaceholderText("系统通知、重连状态和后端错误会显示在这里。")
+        event_layout.addWidget(event_label)
+        event_layout.addWidget(self.event_log)
+
+        handoff_layout.addWidget(session_card, stretch=1)
+        handoff_layout.addWidget(event_card, stretch=1)
 
         config = QtWidgets.QFrame()
         config.setObjectName("VoiceConfig")
@@ -1079,19 +1165,7 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         config_layout.setHorizontalSpacing(14)
         config_layout.setVerticalSpacing(12)
 
-        self.default_config = voice_config_defaults_from_env()
-        self.stt_model_input = self._config_text_input(f"Default: {self.default_config.stt_model}")
-        self.stt_language_input = self._config_text_input(f"Default: {self.default_config.stt_language}")
-        self.llm_model_input = self._config_text_input(f"Default: {self.default_config.llm_model}")
-        self.temperature_input = self._config_text_input(
-            f"Default: {self.default_config.temperature if self.default_config.temperature is not None else 'provider default'}"
-        )
-        self.temperature_input.setValidator(QtGui.QDoubleValidator(0.0, 2.0, 3, self.temperature_input))
-        self.max_tokens_input = self._config_text_input(
-            f"Default: {self.default_config.max_output_tokens if self.default_config.max_output_tokens is not None else 'provider default'}"
-        )
-        self.max_tokens_input.setValidator(QtGui.QIntValidator(1, 8000, self.max_tokens_input))
-        self.tts_model_input = self._config_text_input(f"Default: {self.default_config.tts_model}")
+        self.default_config = RealtimeVoiceConfig()
         self.tts_voice_combo = PolishedComboBox()
         self.tts_voice_combo.setObjectName("VoiceSelect")
         for voice_name, voice_id in voice_choices(self.default_config.tts_voice):
@@ -1100,32 +1174,9 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         voice_index = self.tts_voice_combo.findData(self.default_config.tts_voice)
         if voice_index >= 0:
             self.tts_voice_combo.setCurrentIndex(voice_index)
-        self.tts_speed_input = self._config_text_input(f"Default: {self.default_config.tts_speed:g}")
-        self.tts_speed_input.setValidator(QtGui.QDoubleValidator(0.25, 4.0, 3, self.tts_speed_input))
-        self.eleven_stability_input = self._config_text_input(f"Default: {self.default_config.eleven_stability:g}")
-        self.eleven_stability_input.setValidator(QtGui.QDoubleValidator(0.0, 1.0, 3, self.eleven_stability_input))
-        self.eleven_similarity_input = self._config_text_input(
-            f"Default: {self.default_config.eleven_similarity_boost:g}"
-        )
-        self.eleven_similarity_input.setValidator(QtGui.QDoubleValidator(0.0, 1.0, 3, self.eleven_similarity_input))
-        self.vad_threshold_input = self._config_text_input(f"Default: {self.default_config.vad_activation_threshold:g}")
-        self.vad_threshold_input.setValidator(QtGui.QDoubleValidator(0.3, 0.95, 3, self.vad_threshold_input))
-        self.vad_silence_input = self._config_text_input(f"Default: {self.default_config.vad_silence_duration_ms}")
-        self.vad_silence_input.setValidator(QtGui.QIntValidator(150, 1600, self.vad_silence_input))
 
         fields = [
-            ("转写模型", self.stt_model_input),
-            ("语言", self.stt_language_input),
-            ("LLM 模型", self.llm_model_input),
-            ("温度", self.temperature_input),
-            ("最大输出", self.max_tokens_input),
-            ("TTS 模型", self.tts_model_input),
             ("人物音色", self.tts_voice_combo),
-            ("语速", self.tts_speed_input),
-            ("音色稳定度", self.eleven_stability_input),
-            ("相似度增强", self.eleven_similarity_input),
-            ("VAD 阈值", self.vad_threshold_input),
-            ("静音判定 ms", self.vad_silence_input),
         ]
         for index, (label, widget) in enumerate(fields):
             row = index // 2
@@ -1137,21 +1188,40 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
 
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(10)
-        actions.addStretch(1)
-        self.start_button = QtWidgets.QPushButton("启动")
+        self.start_button = QtWidgets.QPushButton("启动会话")
         self.start_button.setObjectName("PrimaryButton")
-        self.stop_button = QtWidgets.QPushButton("停止")
-        self.stop_button.setObjectName("GhostButton")
+        self.start_button.setMinimumHeight(48)
+        self.mute_button = QtWidgets.QPushButton("麦克风开启")
+        self.mute_button.setObjectName("SecondaryToggleButton")
+        self.mute_button.setCheckable(True)
+        self.mute_button.setMinimumHeight(48)
+        self.mute_button.toggled.connect(self._on_mute_toggled)
+        self.stop_button = QtWidgets.QPushButton("断开")
+        self.stop_button.setObjectName("WarnButton")
+        self.stop_button.setMinimumHeight(48)
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.config()))
         self.stop_button.clicked.connect(self.stop_requested.emit)
-        actions.addWidget(self.start_button)
-        actions.addWidget(self.stop_button)
+        self._sync_mute_button(False)
+        actions.addWidget(self.start_button, stretch=2)
+        actions.addWidget(self.mute_button, stretch=1)
+        actions.addWidget(self.stop_button, stretch=1)
+
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setSpacing(12)
+        top_row.addWidget(config, stretch=1)
+
+        action_frame = QtWidgets.QFrame()
+        action_frame.setObjectName("VoiceActionStrip")
+        action_layout = QtWidgets.QVBoxLayout(action_frame)
+        action_layout.setContentsMargins(18, 16, 18, 16)
+        action_layout.addLayout(actions)
+        top_row.addWidget(action_frame, stretch=2)
 
         root.addWidget(header)
-        root.addWidget(stage)
-        root.addWidget(config)
-        root.addLayout(actions)
+        root.addLayout(top_row)
+        root.addWidget(stage, stretch=1)
+        root.addWidget(handoff)
 
     def _build_channel(self, title: str, waveform: VoiceWaveform) -> QtWidgets.QFrame:
         card = QtWidgets.QFrame()
@@ -1169,12 +1239,6 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         label.setObjectName("VoiceFieldLabel")
         return label
 
-    def _config_text_input(self, placeholder: str) -> QtWidgets.QLineEdit:
-        input_widget = QtWidgets.QLineEdit()
-        input_widget.setPlaceholderText(placeholder)
-        input_widget.setClearButtonEnabled(True)
-        return input_widget
-
     def _apply_styles(self) -> None:
         self.setStyleSheet(
             """
@@ -1187,10 +1251,12 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             QFrame#VoiceHeader,
             QFrame#VoiceStage,
             QFrame#VoiceConfig,
-            QFrame#VoiceChannel {
+            QFrame#VoiceHandoff,
+            QFrame#VoiceChannel,
+            QFrame#VoiceActionStrip {
                 background: rgba(255, 255, 255, 188);
-                border: 1px solid rgba(147, 197, 253, 135);
-                border-radius: 18px;
+                border: none;
+                border-radius: 24px;
             }
             QLabel#VoiceTitle {
                 font-size: 24px;
@@ -1211,8 +1277,8 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             QLineEdit,
             QComboBox {
                 background: rgba(255, 255, 255, 205);
-                border: 1px solid #bfdbfe;
-                border-radius: 8px;
+                border: none;
+                border-radius: 18px;
                 min-height: 22px;
                 padding: 7px 34px 7px 10px;
                 color: #0f2746;
@@ -1232,8 +1298,8 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             QListView#ComboPopupList,
             QComboBox QAbstractItemView {
                 background: #ffffff;
-                border: 1px solid #bfdbfe;
-                border-radius: 8px;
+                border: none;
+                border-radius: 18px;
                 padding: 8px;
                 color: #173b61;
                 outline: 0;
@@ -1243,7 +1309,7 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             QListView#ComboPopupList::item {
                 min-height: 34px;
                 padding: 8px 10px;
-                border-radius: 8px;
+                border-radius: 14px;
             }
             QListView#ComboPopupList::item:hover {
                 background: #eff8ff;
@@ -1254,56 +1320,62 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
                 color: #0756a6;
             }
             QPushButton {
-                border-radius: 10px;
+                border-radius: 18px;
                 padding: 9px 16px;
                 font-weight: 700;
             }
-            QCheckBox#VoiceMuteCheck {
-                color: #17466f;
-                font-size: 12px;
-                font-weight: 700;
-                spacing: 8px;
+            QScrollArea#VoiceScrollArea {
+                background: transparent;
+                border: none;
             }
-            QCheckBox#VoiceMuteCheck::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid #93c5fd;
-                background: #ffffff;
-            }
-            QCheckBox#VoiceMuteCheck::indicator:checked {
-                background: #1d73d4;
-                border: 1px solid #1d73d4;
+            QScrollArea#VoiceScrollArea > QWidget > QWidget {
+                background: transparent;
             }
             QPlainTextEdit#VoiceTranscriptLog {
                 background: rgba(8, 36, 61, 218);
                 color: #eaf5ff;
-                border: 1px solid rgba(147, 197, 253, 155);
-                border-radius: 14px;
+                border: none;
+                border-radius: 22px;
                 font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
                 font-size: 13px;
                 padding: 12px;
                 selection-background-color: #1d73d4;
             }
+            QPlainTextEdit#VoiceSessionInfo,
+            QPlainTextEdit#VoiceEventLog {
+                background: rgba(255, 255, 255, 208);
+                color: #123a63;
+                border: none;
+                border-radius: 18px;
+                font-family: "Cascadia Mono", "Consolas", monospace;
+                font-size: 12px;
+                padding: 10px;
+                selection-background-color: #dbeafe;
+            }
             QPushButton#PrimaryButton {
                 background: #1d73d4;
                 color: #ffffff;
-                border: 1px solid #1d73d4;
+                border: none;
             }
-            QPushButton#GhostButton {
-                background: rgba(255, 255, 255, 190);
+            QPushButton#SecondaryToggleButton {
+                background: rgba(255, 255, 255, 198);
                 color: #17466f;
-                border: 1px solid #bfdbfe;
+                border: none;
+            }
+            QPushButton#SecondaryToggleButton[muted="true"] {
+                background: #fff1f2;
+                color: #b42318;
+                border: none;
             }
             QPushButton:disabled {
                 background: rgba(219, 234, 254, 130);
                 color: #8aaac8;
-                border: 1px solid rgba(191, 219, 254, 150);
+                border: none;
             }
             QLabel[ tone="soft" ] {
                 background: rgba(239, 248, 255, 210);
                 color: #28608f;
-                border: 1px solid #bfdbfe;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -1312,7 +1384,7 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             QLabel[ tone="good" ] {
                 background: rgba(219, 237, 255, 230);
                 color: #0756a6;
-                border: 1px solid #93c5fd;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -1321,7 +1393,7 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             QLabel[ tone="warm" ] {
                 background: #fff7ed;
                 color: #b45309;
-                border: 1px solid #fed7aa;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -1330,91 +1402,111 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             """
         )
 
-    def config(self) -> VoiceAssistantConfig:
-        return VoiceAssistantConfig(
-            stt_model=self.stt_model_input.text().strip() or self.default_config.stt_model,
-            stt_language=self.stt_language_input.text().strip() or self.default_config.stt_language,
-            llm_model=self.llm_model_input.text().strip() or self.default_config.llm_model,
-            temperature=self._optional_float(self.temperature_input, self.default_config.temperature),
-            max_output_tokens=self._optional_int(self.max_tokens_input, self.default_config.max_output_tokens),
-            tts_model=self.tts_model_input.text().strip() or self.default_config.tts_model,
+    def config(self) -> RealtimeVoiceConfig:
+        return RealtimeVoiceConfig(
             tts_voice=str(self.tts_voice_combo.currentData() or self.default_config.tts_voice),
-            tts_speed=self._optional_float(self.tts_speed_input, self.default_config.tts_speed) or DEFAULT_TTS_SPEED,
-            eleven_stability=self._optional_float(
-                self.eleven_stability_input,
-                self.default_config.eleven_stability,
-            ),
-            eleven_similarity_boost=self._optional_float(
-                self.eleven_similarity_input,
-                self.default_config.eleven_similarity_boost,
-            ),
-            vad_activation_threshold=self._optional_float(
-                self.vad_threshold_input,
-                self.default_config.vad_activation_threshold,
-            )
-            or self.default_config.vad_activation_threshold,
-            vad_silence_duration_ms=self._optional_int(
-                self.vad_silence_input,
-                self.default_config.vad_silence_duration_ms,
-            )
-            or self.default_config.vad_silence_duration_ms,
-            vad_prefix_padding_ms=self.default_config.vad_prefix_padding_ms,
         )
 
-    def _optional_float(self, input_widget: QtWidgets.QLineEdit, default: float | None) -> float | None:
-        text = input_widget.text().strip()
-        return default if not text else float(text)
+    def _on_mute_toggled(self, muted: bool) -> None:
+        self._sync_mute_button(muted)
+        self.mute_changed.emit(muted)
 
-    def _optional_int(self, input_widget: QtWidgets.QLineEdit, default: int | None) -> int | None:
-        text = input_widget.text().strip()
-        return default if not text else int(text)
+    def _sync_mute_button(self, muted: bool) -> None:
+        self.mute_button.setText("麦克风已静音" if muted else "麦克风开启")
+        self.mute_button.setProperty("muted", muted)
+        repolish_widget(self.mute_button)
+
+    def is_user_muted(self) -> bool:
+        return self.mute_button.isChecked()
 
     def set_running(self, running: bool) -> None:
         self.running = running
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
-        self.mute_checkbox.setEnabled(running)
+        self.mute_button.setEnabled(running)
         self.status_badge.set_badge("运行中" if running else "已停止", "good" if running else "soft")
         if not running:
             self.user_wave.set_state("idle")
             self.agent_wave.set_state("idle")
+            if self.mute_button.isChecked():
+                self.mute_button.blockSignals(True)
+                self.mute_button.setChecked(False)
+                self.mute_button.blockSignals(False)
+            self._sync_mute_button(False)
         self.detail_label.setText(
-            "LiveKit worker 已运行，最新画面会注入到用户回合中。"
+            "语音会话已启动，桌面端会直接连接 RealtimeAIChat 返回的 LiveKit 会话。"
             if running
-            else "启动后由 LiveKit worker 接入实时房间，字幕在下方滚动显示。"
+            else "启动后会检查后端、创建 session 并自动接入 LiveKit。"
         )
+
+    def set_connection_detail(self, detail: str) -> None:
+        self.detail_label.setText(detail)
+
+    def set_session_config(self, session: RealtimeVoiceSessionConfig | None) -> None:
+        self.session_info.setPlainText(format_voice_session_details(session))
+
+    def set_event_lines(self, lines: list[str]) -> None:
+        next_text = "\n".join(lines)
+        if self.event_log.toPlainText() == next_text:
+            return
+        self.event_log.setPlainText(next_text)
+        self.event_log.moveCursor(QtGui.QTextCursor.End)
 
     def set_runtime_state(self, *, user_state: str, agent_state: str, user_muted: bool) -> None:
         if not self.running:
             return
-        if self.mute_checkbox.isChecked() != user_muted:
-            self.mute_checkbox.blockSignals(True)
-            self.mute_checkbox.setChecked(user_muted)
-            self.mute_checkbox.blockSignals(False)
+        if self.mute_button.isChecked() != user_muted:
+            self.mute_button.blockSignals(True)
+            self.mute_button.setChecked(user_muted)
+            self.mute_button.blockSignals(False)
+        self._sync_mute_button(user_muted)
         self.user_wave.set_muted(user_muted)
         self.user_wave.set_state("idle" if user_muted else user_state)
         self.agent_wave.set_state(agent_state)
 
-        if user_muted:
-            label = "用户麦克风已静音"
-        elif agent_state == "speaking":
+        if agent_state == "speaking":
             label = "AI 正在回答"
         elif agent_state == "thinking":
             label = "AI 正在思考"
+        elif user_muted:
+            label = "用户麦克风已静音"
         elif user_state == "speaking":
             label = "正在接收用户语音"
         else:
             label = "正在监听"
-        self.status_badge.set_badge(label, "warm" if user_muted else "good")
+        tone = "good" if agent_state == "speaking" else "warm" if user_muted else "good"
+        self.status_badge.set_badge(label, tone)
 
-    def set_transcript_lines(self, lines: list[object]) -> None:
+    def set_transcript_lines(
+        self,
+        lines: list[object],
+        *,
+        live_captions: dict[str, str] | None = None,
+        live_caption_timestamps: dict[str, str] | None = None,
+    ) -> None:
         formatted: list[str] = []
         role_names = {"user": "用户", "assistant": "AI", "system": "系统"}
         for line in lines:
             role = role_names.get(getattr(line, "role", "system"), str(getattr(line, "role", "system")))
             text = str(getattr(line, "text", "")).strip()
             if text:
-                formatted.append(f"{role}: {text}")
+                timestamp = str(getattr(line, "timestamp", "")).strip()
+                prefix = f"[{timestamp}] " if timestamp else ""
+                formatted.append(f"{prefix}{role}: {text}")
+        if live_captions:
+            for role_key in ("user", "assistant"):
+                text = str(live_captions.get(role_key, "")).strip()
+                if not text:
+                    continue
+                label = role_names.get(role_key, role_key)
+                timestamp = ""
+                if live_caption_timestamps is not None:
+                    timestamp = str(live_caption_timestamps.get(role_key, "")).strip()
+                prefix = f"[{timestamp}] " if timestamp else ""
+                candidate = f"{prefix}{label}: {text}"
+                if formatted and formatted[-1] == candidate:
+                    continue
+                formatted.append(candidate)
         next_text = "\n".join(formatted)
         if self.transcript_log.toPlainText() == next_text:
             return
@@ -1730,15 +1822,15 @@ class InsightsWindow(QtWidgets.QWidget):
             QFrame#TrendCard,
             QFrame#StatTile {
                 background: rgba(255, 255, 255, 188);
-                border: 1px solid rgba(147, 197, 253, 135);
-                border-radius: 22px;
+                border: none;
+                border-radius: 24px;
             }
             QFrame#TrendCard {
-                border-radius: 20px;
+                border-radius: 24px;
             }
             QLabel#InsightsIcon {
                 background: rgba(219, 237, 255, 230);
-                border: 1px solid #93c5fd;
+                border: none;
                 border-radius: 24px;
                 color: #0756a6;
                 font-size: 38px;
@@ -1778,7 +1870,7 @@ class InsightsWindow(QtWidgets.QWidget):
             }
             QFrame#StatTile[featured="true"] {
                 background: rgba(219, 237, 255, 220);
-                border: 1px solid #93c5fd;
+                border: none;
             }
             QFrame#StatTile[featured="true"] QLabel#TileValue {
                 color: #0756a6;
@@ -1786,7 +1878,7 @@ class InsightsWindow(QtWidgets.QWidget):
             QLabel[ tone="soft" ] {
                 background: rgba(239, 248, 255, 210);
                 color: #28608f;
-                border: 1px solid #bfdbfe;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -1795,7 +1887,7 @@ class InsightsWindow(QtWidgets.QWidget):
             QLabel[ tone="good" ] {
                 background: rgba(219, 237, 255, 230);
                 color: #0756a6;
-                border: 1px solid #93c5fd;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -1804,7 +1896,7 @@ class InsightsWindow(QtWidgets.QWidget):
             QLabel[ tone="warm" ] {
                 background: #eef7ff;
                 color: #1d5f99;
-                border: 1px solid #bfdbfe;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -1813,7 +1905,7 @@ class InsightsWindow(QtWidgets.QWidget):
             QLabel[ tone="danger" ] {
                 background: #fff1f2;
                 color: #b42318;
-                border: 1px solid #fecdd3;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -1897,15 +1989,25 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.camera_scan_process: QtCore.QProcess | None = None
         self.camera_scan_timer: QtCore.QTimer | None = None
         self.camera_scan_previous_data: str | None = None
-        self.voice_process: subprocess.Popen | None = None
+        self.voice_client_thread: DesktopLiveKitClientThread | None = None
+        self.voice_session_config: RealtimeVoiceSessionConfig | None = None
+        self.voice_api_client = RealtimeChatApiClient(base_url=realtime_chat_api_base_url())
+        self.voice_client_state = "idle"
+        self.voice_client_detail = "启动后会检查 RealtimeAIChat 后端，并自动创建语音会话。"
+        self.voice_agent_present = False
+        self.voice_live_captions: dict[str, str] = {"user": "", "assistant": ""}
+        self.voice_live_caption_timestamps: dict[str, str] = {"user": "", "assistant": ""}
+        self.voice_activity_until: dict[str, float] = {"user": 0.0, "assistant": 0.0}
+        self.voice_transcript_lines: list[VoiceTranscriptLine] = []
+        self.voice_event_lines: list[str] = []
+        self.voice_room: str | None = None
+        self.voice_user_identity: str | None = None
+        self.voice_image_history: deque[VoiceImageSnapshot] = deque(maxlen=6)
+        self.voice_image_sample_interval_s = 5.0
+        self.voice_last_image_sample_at = 0.0
+        self.voice_caption_clear_timers: dict[str, QtCore.QTimer] = {}
+        self.voice_activity_decay_timers: dict[str, QtCore.QTimer] = {}
         self.repo_root = Path(__file__).resolve().parents[2]
-        self.voice_frame_store = self.repo_root / DEFAULT_FRAME_STORE
-        self.voice_control_store = self.repo_root / DEFAULT_CONTROL_STORE
-        self.voice_transcript_store = self.repo_root / DEFAULT_TRANSCRIPT_STORE
-        self.voice_status_store = self.repo_root / DEFAULT_STATUS_STORE
-        self.voice_log_store = self.repo_root / "runtime" / "voice" / "worker.log"
-        self.voice_log_file: IO[str] | None = None
-        self.voice_last_sample_monotonic: float | None = None
 
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1560, 980)
@@ -1919,14 +2021,22 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.refresh_timer = QtCore.QTimer(self)
         self.refresh_timer.setInterval(33)
         self.refresh_timer.timeout.connect(self._tick)
-        self.voice_ui_timer = QtCore.QTimer(self)
-        self.voice_ui_timer.setInterval(250)
-        self.voice_ui_timer.timeout.connect(self._refresh_voice_ui)
-        self.voice_ui_timer.start()
 
         self._build_ui()
         self._apply_styles()
         self._wire_events()
+        for role in ("user", "assistant"):
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda active_role=role: self._clear_voice_live_caption(active_role))
+            self.voice_caption_clear_timers[role] = timer
+            decay_timer = QtCore.QTimer(self)
+            decay_timer.setSingleShot(True)
+            decay_timer.timeout.connect(self._refresh_voice_ui)
+            self.voice_activity_decay_timers[role] = decay_timer
+        self.voice_window.set_session_config(None)
+        self.voice_window.set_connection_detail(self.voice_client_detail)
+        self.voice_window.set_event_lines(self.voice_event_lines)
         self._refresh_serial_ports()
 
         if self.initial_camera:
@@ -1938,7 +2048,6 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.refresh_timer.stop()
-        self.voice_ui_timer.stop()
         self._cancel_camera_scan(log_event=False)
         self._stop_voice_assistant(log_event=False)
         self.runtime.close_camera()
@@ -2043,7 +2152,14 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         for page_key, button in self.nav_buttons.items():
             button.set_active(page_key == key)
         if key == "voice":
-            self.voice_window.set_running(self._voice_assistant_running())
+            self.voice_window.set_running(
+                self._voice_assistant_running()
+                or self.voice_session_config is not None
+                or self.voice_client_state in {"checking_backend", "creating_session", "reconnecting", "closing"}
+            )
+            self.voice_window.set_connection_detail(self.voice_client_detail)
+            self.voice_window.set_session_config(self.voice_session_config)
+            self.voice_window.set_event_lines(self.voice_event_lines)
 
     def _build_header(self) -> QtWidgets.QFrame:
         header = QtWidgets.QFrame()
@@ -2318,8 +2434,8 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             }
             QFrame#Sidebar {
                 background: rgba(255, 255, 255, 178);
-                border: 1px solid rgba(147, 197, 253, 150);
-                border-radius: 18px;
+                border: none;
+                border-radius: 24px;
             }
             QLabel#SidebarBrand {
                 color: #0756a6;
@@ -2340,18 +2456,18 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
                 text-align: left;
                 background: rgba(255, 255, 255, 110);
                 color: #17466f;
-                border: 1px solid rgba(191, 219, 254, 120);
-                border-radius: 20px;
+                border: none;
+                border-radius: 22px;
                 padding: 0;
             }
             QPushButton#SidebarNavButton:hover {
                 background: rgba(239, 248, 255, 210);
-                border: 1px solid rgba(96, 165, 250, 180);
+                border: none;
             }
             QPushButton#SidebarNavButton[active="true"],
             QPushButton#SidebarNavButton:checked {
                 background: rgba(219, 237, 255, 235);
-                border: 1px solid #60a5fa;
+                border: none;
             }
             QLabel#SidebarNavTitle {
                 color: #0b5cad;
@@ -2374,8 +2490,8 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QFrame#GuidanceCard,
             QFrame#DialogShell {
                 background: rgba(255, 255, 255, 188);
-                border: 1px solid rgba(147, 197, 253, 135);
-                border-radius: 18px;
+                border: none;
+                border-radius: 24px;
             }
             QFrame#SectionShell {
                 background: transparent;
@@ -2383,25 +2499,25 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             }
             QFrame#StatTile {
                 background: rgba(247, 251, 255, 180);
-                border: 1px solid rgba(191, 219, 254, 150);
-                border-radius: 16px;
+                border: none;
+                border-radius: 20px;
             }
             QFrame#StatTile[featured="true"] {
                 background: rgba(219, 237, 255, 220);
-                border: 1px solid #93c5fd;
-                border-radius: 18px;
+                border: none;
+                border-radius: 22px;
             }
             QFrame#GuidanceCard[tone="soft"] {
                 background: rgba(239, 248, 255, 185);
-                border: 1px solid rgba(191, 219, 254, 145);
+                border: none;
             }
             QFrame#GuidanceCard[tone="good"] {
                 background: rgba(219, 237, 255, 225);
-                border: 1px solid #93c5fd;
+                border: none;
             }
             QFrame#GuidanceCard[tone="warm"] {
                 background: rgba(232, 242, 255, 215);
-                border: 1px solid #bfdbfe;
+                border: none;
             }
             QLabel#BrandLabel {
                 font-size: 24px;
@@ -2469,14 +2585,14 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QLabel#VideoSurface {
                 background: #08243d;
                 color: #eaf5ff;
-                border: 1px solid rgba(147, 197, 253, 150);
-                border-radius: 26px;
+                border: none;
+                border-radius: 28px;
                 padding: 10px;
             }
             QLabel[ tone="soft" ] {
                 background: rgba(239, 248, 255, 210);
                 color: #28608f;
-                border: 1px solid #bfdbfe;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -2485,7 +2601,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QLabel[ tone="good" ] {
                 background: rgba(219, 237, 255, 230);
                 color: #0756a6;
-                border: 1px solid #93c5fd;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -2494,7 +2610,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QLabel[ tone="warm" ] {
                 background: #eef7ff;
                 color: #1d5f99;
-                border: 1px solid #bfdbfe;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -2503,7 +2619,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QLabel[ tone="danger" ] {
                 background: #fff1f2;
                 color: #b42318;
-                border: 1px solid #fecdd3;
+                border: none;
                 border-radius: 999px;
                 padding: 7px 13px;
                 font-size: 12px;
@@ -2513,8 +2629,8 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QLineEdit,
             QPlainTextEdit {
                 background: rgba(255, 255, 255, 205);
-                border: 1px solid #bfdbfe;
-                border-radius: 8px;
+                border: none;
+                border-radius: 18px;
                 min-height: 22px;
                 padding: 8px 34px 8px 11px;
                 color: #0f2746;
@@ -2523,8 +2639,8 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QPlainTextEdit#ActivityLog {
                 background: rgba(8, 36, 61, 215);
                 color: #eaf5ff;
-                border: 1px solid rgba(147, 197, 253, 155);
-                border-radius: 18px;
+                border: none;
+                border-radius: 24px;
                 font-family: "Cascadia Mono", "Consolas", monospace;
                 font-size: 12px;
                 padding: 14px;
@@ -2543,8 +2659,8 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QListView#ComboPopupList,
             QComboBox QAbstractItemView {
                 background: #ffffff;
-                border: 1px solid #bfdbfe;
-                border-radius: 8px;
+                border: none;
+                border-radius: 18px;
                 padding: 8px;
                 color: #173b61;
                 outline: 0;
@@ -2554,7 +2670,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QListView#ComboPopupList::item {
                 min-height: 34px;
                 padding: 8px 10px;
-                border-radius: 8px;
+                border-radius: 14px;
             }
             QListView#ComboPopupList::item:hover {
                 background: #eff8ff;
@@ -2566,34 +2682,34 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             }
             QRubberBand#SelectionBand {
                 background: rgba(37, 99, 235, 0.14);
-                border: 2px solid #2563eb;
-                border-radius: 10px;
+                border: none;
+                border-radius: 18px;
             }
             QPushButton {
-                border-radius: 14px;
+                border-radius: 18px;
                 padding: 11px 16px;
                 font-weight: 700;
-                border: 1px solid transparent;
+                border: none;
                 background: rgba(255, 255, 255, 210);
                 color: #0f2746;
             }
             QPushButton#PrimaryButton {
                 background: #1d73d4;
                 color: #ffffff;
-                border: 1px solid #1d73d4;
+                border: none;
             }
             QPushButton#PrimaryButton:hover {
                 background: #2563eb;
-                border: 1px solid #2563eb;
+                border: none;
             }
             QPushButton#PrimaryButton:pressed {
                 background: #0756a6;
-                border: 1px solid #0756a6;
+                border: none;
             }
             QPushButton#GhostButton {
                 background: rgba(255, 255, 255, 190);
                 color: #17466f;
-                border: 1px solid #bfdbfe;
+                border: none;
             }
             QPushButton#GhostButton:hover {
                 background: rgba(239, 248, 255, 230);
@@ -2604,7 +2720,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QPushButton#WarnButton {
                 background: #fff7ed;
                 color: #c23b32;
-                border: 1px solid #fed7aa;
+                border: none;
             }
             QPushButton#WarnButton:hover {
                 background: #ffedd5;
@@ -2615,7 +2731,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QPushButton#HeaderPillButton {
                 background: rgba(255, 255, 255, 190);
                 color: #17466f;
-                border: 1px solid #bfdbfe;
+                border: none;
                 border-radius: 999px;
                 padding: 8px 16px;
                 min-height: 34px;
@@ -2629,12 +2745,12 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QPushButton:disabled {
                 background: rgba(219, 234, 254, 130);
                 color: #8aaac8;
-                border: 1px solid rgba(191, 219, 254, 150);
+                border: none;
             }
             QFrame#ToastMessage {
                 background: #fff1f2;
-                border: 1px solid #fecdd3;
-                border-radius: 16px;
+                border: none;
+                border-radius: 20px;
             }
             QLabel#ToastLabel {
                 color: #b42318;
@@ -2645,7 +2761,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QComboBox:focus,
             QLineEdit:focus,
             QPlainTextEdit:focus {
-                border: 1px solid #60a5fa;
+                border: none;
                 outline: none;
             }
             QScrollBar:vertical {
@@ -2868,6 +2984,8 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             return
 
         self._clear_history()
+        self.voice_image_history.clear()
+        self.voice_last_image_sample_at = 0.0
         self.backend_value.setText(backend_name)
         self.camera_hint.set_badge(f"Camera {source}", "soft")
         self.refresh_timer.start()
@@ -2881,6 +2999,8 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.runtime.close_camera()
         self.latest_snapshot = None
         self._clear_history()
+        self.voice_image_history.clear()
+        self.voice_last_image_sample_at = 0.0
         self.video_widget.clear_preview("Open a camera to start the stage preview")
         self.camera_hint.set_badge("Camera Closed", "soft")
         self._update_status_labels(None, force_idle=False)
@@ -2992,124 +3112,378 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.report_thread = None
         self._refresh_interaction_state()
 
-    def _start_voice_assistant(self, config: VoiceAssistantConfig | None = None) -> None:
-        if self._voice_assistant_running():
+    def _build_voice_extra_vars(self) -> dict[str, object]:
+        snapshot = self.latest_snapshot
+        payload: dict[str, object] = {
+            "client": "TargetPointer",
+            "serial_connected": bool(self.runtime.serial_client is not None),
+            "serial_port": str(self.runtime.serial_port or ""),
+            "camera_open": snapshot is not None,
+            "image_mode": "recent_snapshots",
+        }
+        if snapshot is None:
+            return payload
+        payload["tracking_state"] = snapshot.tracking_state
+        payload["target_angle"] = snapshot.target_angle
+        payload["output_angle"] = snapshot.output_angle
+        payload["detections"] = len(snapshot.pending_detections)
+        payload["missed_frames"] = snapshot.missed_frames
+        if snapshot.tracked_bbox is not None:
+            payload["tracked_bbox"] = list(snapshot.tracked_bbox)
+        return payload
+
+    def _capture_voice_image_snapshot(self, snapshot: RuntimeSnapshot, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self.voice_last_image_sample_at < self.voice_image_sample_interval_s:
             return
 
-        missing = missing_voice_env_vars()
-        if missing:
-            self._show_error_toast("Voice assistant is missing required environment variables.")
-            self._log(f"Voice assistant blocked: missing {', '.join(missing)}")
+        frame = render_preview_frame(snapshot)
+        label = datetime.now().strftime("%H:%M:%S")
+        cv2.rectangle(frame, (18, 18), (252, 74), (7, 34, 58), -1)
+        cv2.putText(
+            frame,
+            f"Captured {label}",
+            (32, 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (234, 245, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        self.voice_image_history.append(
+            VoiceImageSnapshot(
+                captured_at=now,
+                captured_at_label=label,
+                frame=frame,
+            )
+        )
+        self.voice_last_image_sample_at = now
+
+    def _build_voice_attachments(self) -> list[dict[str, object]]:
+        if self.latest_snapshot is not None and not self.voice_image_history:
+            self._capture_voice_image_snapshot(self.latest_snapshot, force=True)
+
+        recent_images = list(self.voice_image_history)[-VOICE_IMAGE_ATTACHMENT_LIMIT:]
+        attachments: list[dict[str, object]] = []
+        total = len(recent_images)
+        for index, item in enumerate(recent_images, start=1):
+            frame = item.frame.copy()
+            cv2.rectangle(frame, (frame.shape[1] - 280, 18), (frame.shape[1] - 18, 74), (29, 115, 212), -1)
+            cv2.putText(
+                frame,
+                f"Seq {index}/{total}  {item.captured_at_label}",
+                (frame.shape[1] - 260, 54),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            jpeg_bytes = encode_jpeg(frame, max_side=960, quality=72)
+            attachments.append(
+                {
+                    "kind": "image",
+                    "source": "user_upload",
+                    "title": f"时序画面 {index}/{total} · {item.captured_at_label}",
+                    "mime_type": "image/jpeg",
+                    "uri": jpeg_data_url(jpeg_bytes),
+                    "text": (
+                        f"第 {index} 张时序画面，捕获时间 {item.captured_at_label}。"
+                        "图片中矩形框表示当前锁定人物。"
+                    ),
+                    "metadata": {
+                        "sequence_index": index,
+                        "sequence_total": total,
+                        "captured_at": item.captured_at_label,
+                        "source": "targetpointer_recent_snapshot",
+                    },
+                }
+            )
+        return attachments
+
+    def _append_voice_event(self, message: str) -> None:
+        timestamp = format_voice_timestamp()
+        self.voice_event_lines.append(f"{timestamp} {message}")
+        self.voice_event_lines = self.voice_event_lines[-120:]
+        self.voice_window.set_event_lines(self.voice_event_lines)
+
+    def _append_voice_transcript(self, role: str, text: str) -> None:
+        cleaned = text.strip()
+        if not cleaned:
             return
-        if self.latest_snapshot is None:
-            self._show_error_toast("Open a camera before starting the voice assistant.")
+        line = VoiceTranscriptLine(timestamp=format_voice_timestamp(), role=role, text=cleaned)
+        if self.voice_transcript_lines and self.voice_transcript_lines[-1] == line:
+            return
+        self.voice_transcript_lines.append(line)
+        self.voice_transcript_lines = self.voice_transcript_lines[-80:]
+
+    def _mark_voice_activity(self, role: str, duration_s: float) -> None:
+        if role not in self.voice_activity_until:
+            return
+        duration_ms = max(0, int(duration_s * 1000))
+        self.voice_activity_until[role] = max(self.voice_activity_until[role], time.monotonic() + max(0.0, duration_s))
+        decay_timer = self.voice_activity_decay_timers.get(role)
+        if decay_timer is not None:
+            decay_timer.stop()
+            decay_timer.start(duration_ms + 60)
+
+    def _clear_voice_live_caption(self, role: str) -> None:
+        if role not in self.voice_live_captions:
+            return
+        if self.voice_live_captions.get(role):
+            self.voice_live_captions[role] = ""
+            self.voice_live_caption_timestamps[role] = ""
+            self._refresh_voice_ui()
+
+    def _attach_voice_client(self, session_config: RealtimeVoiceSessionConfig) -> None:
+        self.voice_client_thread = DesktopLiveKitClientThread(
+            session_config,
+            start_muted=self.voice_window.is_user_muted(),
+            parent=self,
+        )
+        self.voice_client_thread.state_changed.connect(self._on_voice_client_state_changed)
+        self.voice_client_thread.system_message.connect(self._on_voice_client_system_message)
+        self.voice_client_thread.live_caption_changed.connect(self._on_voice_live_caption_changed)
+        self.voice_client_thread.agent_availability_changed.connect(self._on_voice_agent_availability_changed)
+        self.voice_client_thread.failure_reported.connect(self._on_voice_client_failure)
+        self.voice_client_thread.reconnect_requested.connect(self._on_voice_client_reconnect_requested)
+        self.voice_client_thread.finished.connect(self._on_voice_client_thread_finished)
+        self.voice_client_thread.start()
+
+    def _teardown_voice_client(self) -> None:
+        thread = self.voice_client_thread
+        self.voice_client_thread = None
+        if thread is None:
+            return
+        thread.stop_client()
+        thread.wait(5000)
+        thread.deleteLater()
+
+    def _start_voice_assistant(self, config: RealtimeVoiceConfig | None = None) -> None:
+        if self._voice_assistant_running() or self.voice_client_state in {
+            "checking_backend",
+            "creating_session",
+            "reconnecting",
+        }:
             return
 
         config = config or self.voice_window.config()
-        self._sample_voice_frame(self.latest_snapshot, force=True)
-        write_voice_control(self.voice_control_store, user_muted=self.voice_window.mute_checkbox.isChecked())
-        write_voice_status(
-            self.voice_status_store,
-            user_state="idle",
-            agent_state="initializing",
-            user_muted=self.voice_window.mute_checkbox.isChecked(),
-        )
-        clear_voice_transcript(self.voice_transcript_store)
-        self.voice_log_store.parent.mkdir(parents=True, exist_ok=True)
-        agent_script = self.repo_root / "scripts" / "pointer_voice_agent.py"
-        command = [
-            sys.executable,
-            str(agent_script),
-            "--frame-store",
-            str(self.voice_frame_store),
-            "--control-store",
-            str(self.voice_control_store),
-            "--transcript-store",
-            str(self.voice_transcript_store),
-            "--status-store",
-            str(self.voice_status_store),
-            "dev",
-        ]
+        self.voice_window.set_running(True)
+        self.voice_transcript_lines = []
+        self.voice_event_lines = []
+        self.voice_live_captions = {"user": "", "assistant": ""}
+        self.voice_live_caption_timestamps = {"user": "", "assistant": ""}
+        self.voice_activity_until = {"user": 0.0, "assistant": 0.0}
+        self.voice_agent_present = False
+        self.voice_session_config = None
+        self.voice_room = None
+        self.voice_user_identity = None
+        self.voice_client_state = "checking_backend"
+        self.voice_client_detail = "正在检查 RealtimeAIChat 后端。"
+        self._refresh_voice_ui()
+
         try:
-            process_env = os.environ.copy()
-            process_env.update(config.process_env())
-            self.voice_log_file = self.voice_log_store.open("w", encoding="utf-8")
-            self.voice_process = subprocess.Popen(
-                command,
-                stdout=self.voice_log_file,
-                stderr=subprocess.STDOUT,
-                cwd=str(self.repo_root),
-                env=process_env,
+            self.voice_api_client.health_check()
+            self._append_voice_event("RealtimeAIChat 后端健康检查通过。")
+            capabilities = self.voice_api_client.get_capabilities()
+            allow_client_ai_mode = bool(
+                ((capabilities.get("defaults") or {}) if isinstance(capabilities, dict) else {}).get(
+                    "allow_client_ai_mode",
+                    False,
+                )
             )
-        except Exception as exc:
-            self.voice_process = None
-            if self.voice_log_file is not None:
-                self.voice_log_file.close()
-                self.voice_log_file = None
-            self._log(f"Voice assistant failed to start: {exc}")
-            self._show_error_toast("Voice assistant failed to start.")
+            self.voice_client_state = "creating_session"
+            self.voice_client_detail = "正在创建语音会话。"
+            self._refresh_voice_ui()
+            attachments = self._build_voice_attachments()
+            payload = build_realtime_voice_session_payload(
+                config,
+                user_identity=DEFAULT_TARGETPOINTER_USER_IDENTITY,
+                extra_vars=self._build_voice_extra_vars(),
+                attachments=attachments,
+                allow_client_ai_mode=allow_client_ai_mode,
+            )
+            session_config = self.voice_api_client.create_session(payload)
+        except RealtimeChatApiError as exc:
+            self.voice_client_state = "error"
+            self.voice_client_detail = f"语音后端不可用：{exc}"
+            self._append_voice_event(str(exc))
+            self.voice_window.set_running(False)
+            self._show_error_toast("RealtimeAIChat 后端不可用。")
+            self._refresh_voice_ui()
             self._refresh_interaction_state()
             return
 
-        self.voice_window.set_running(True)
-        self._refresh_voice_ui()
-        self._log(
-            f"Voice assistant started: pipeline stt={config.stt_model} llm={config.llm_model} "
-            f"tts={config.tts_model}/{config.tts_voice} vad={config.vad_activation_threshold:.2f}/"
-            f"{config.vad_silence_duration_ms}ms"
+        self.voice_session_config = session_config
+        self.voice_room = session_config.room
+        self.voice_user_identity = session_config.user_identity
+        self.voice_client_state = "connecting"
+        self.voice_client_detail = "桌面端正在接入 LiveKit 语音会话。"
+        self._append_voice_event(
+            f"会话已创建：session={session_config.session_id} room={session_config.room}"
         )
+        if attachments:
+            self._append_voice_event(
+                f"已发送最近 {len(attachments)} 张时序图片到 RealtimeAIChat（最多 {VOICE_IMAGE_ATTACHMENT_LIMIT} 张）。"
+            )
+        else:
+            self._append_voice_event("当前没有可用图片，已按纯音频模式创建会话。")
+        self._log(
+            f"Voice session created: session={session_config.session_id} room={session_config.room} "
+            f"tts_voice={config.tts_voice} image_attachments={len(attachments)}"
+        )
+        self._attach_voice_client(session_config)
+        self._refresh_voice_ui()
         self._refresh_interaction_state()
 
     def _stop_voice_assistant(self, *, log_event: bool = True) -> None:
-        if self.voice_process is None:
-            return
-        if self.voice_process.poll() is None:
-            self.voice_process.terminate()
+        session_id = self.voice_session_config.session_id if self.voice_session_config is not None else None
+        self.voice_client_state = "closing" if session_id else "idle"
+        self.voice_client_detail = "正在关闭语音会话。" if session_id else "语音会话已停止。"
+        self._teardown_voice_client()
+        if session_id is not None:
             try:
-                self.voice_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.voice_process.kill()
-                self.voice_process.wait(timeout=3)
-        self.voice_process = None
-        if self.voice_log_file is not None:
-            self.voice_log_file.close()
-            self.voice_log_file = None
+                self.voice_api_client.close_session(session_id)
+                self._append_voice_event(f"语音会话已关闭：{session_id}")
+            except RealtimeChatApiError as exc:
+                self._append_voice_event(f"关闭远端会话失败：{exc}")
+        self.voice_room = None
+        self.voice_user_identity = None
+        self.voice_session_config = None
+        self.voice_client_state = "idle"
+        self.voice_client_detail = "启动后会检查 RealtimeAIChat 后端，并自动创建语音会话。"
+        self.voice_agent_present = False
+        self.voice_live_captions = {"user": "", "assistant": ""}
+        self.voice_live_caption_timestamps = {"user": "", "assistant": ""}
+        self.voice_activity_until = {"user": 0.0, "assistant": 0.0}
+        for timer in self.voice_caption_clear_timers.values():
+            timer.stop()
+        for timer in self.voice_activity_decay_timers.values():
+            timer.stop()
         self.voice_window.set_running(False)
-        write_voice_control(self.voice_control_store, user_muted=False)
-        write_voice_status(self.voice_status_store, user_state="idle", agent_state="idle", user_muted=False)
+        self._refresh_voice_ui()
         if log_event:
             self._log("Voice assistant stopped")
-            self._refresh_interaction_state()
+        self._refresh_interaction_state()
 
     def _voice_assistant_running(self) -> bool:
-        if self.voice_process is None:
-            return False
-        if self.voice_process.poll() is None:
-            return True
-        self._log(f"Voice assistant exited with code {self.voice_process.returncode}")
-        self._log(f"Voice worker log: {self.voice_log_store}")
-        self.voice_process = None
-        if self.voice_log_file is not None:
-            self.voice_log_file.close()
-            self.voice_log_file = None
-        self.voice_window.set_running(False)
-        return False
+        return self.voice_client_thread is not None and self.voice_client_thread.isRunning()
 
     def _set_voice_user_muted(self, muted: bool) -> None:
-        write_voice_control(self.voice_control_store, user_muted=muted)
+        if self.voice_client_thread is not None:
+            self.voice_client_thread.set_microphone_muted(muted)
+        self._append_voice_event("用户麦克风已静音" if muted else "用户麦克风已开启")
         self._log("Voice user microphone muted" if muted else "Voice user microphone unmuted")
         self._refresh_voice_ui()
 
+    def _on_voice_client_state_changed(self, state: str, detail: str) -> None:
+        self.voice_client_state = state
+        self.voice_client_detail = detail
+        self.voice_window.set_connection_detail(detail)
+        self._refresh_voice_ui()
+
+    def _on_voice_client_system_message(self, message: str) -> None:
+        self._append_voice_event(message)
+        self._log(message)
+        self._refresh_voice_ui()
+
+    def _on_voice_live_caption_changed(self, role: str, text: str, is_final: bool) -> None:
+        cleaned = text.strip()
+        if role not in self.voice_live_captions or not cleaned:
+            return
+        clear_timer = self.voice_caption_clear_timers.get(role)
+        if clear_timer is not None:
+            clear_timer.stop()
+        self.voice_live_captions[role] = cleaned
+        self.voice_live_caption_timestamps[role] = format_voice_timestamp()
+        if is_final:
+            self._append_voice_transcript(role, cleaned)
+            self._mark_voice_activity(role, 0.9)
+            if clear_timer is not None:
+                clear_timer.start(700)
+        else:
+            self._mark_voice_activity(role, 1.4)
+        self._refresh_voice_ui()
+
+    def _on_voice_agent_availability_changed(self, available: bool) -> None:
+        self.voice_agent_present = available
+        self._refresh_voice_ui()
+
+    def _on_voice_client_failure(self, message: str) -> None:
+        self._append_voice_event(f"LiveKit client 失败：{message}")
+        self._log(f"Voice client failed: {message}")
+        self._show_error_toast("LiveKit client failed. Check audio device and room settings.")
+
+    def _on_voice_client_reconnect_requested(self) -> None:
+        session = self.voice_session_config
+        if session is None:
+            return
+        self._append_voice_event("连接中断，正在向后端申请新的重连 token。")
+        self._teardown_voice_client()
+        try:
+            session_config = self.voice_api_client.reconnect_session(session.session_id)
+        except RealtimeChatApiError as exc:
+            self.voice_client_state = "error"
+            self.voice_client_detail = f"会话恢复失败：{exc}"
+            self.voice_session_config = None
+            self.voice_room = None
+            self.voice_user_identity = None
+            self.voice_agent_present = False
+            self.voice_window.set_running(False)
+            self._append_voice_event(str(exc))
+            self._show_error_toast("语音会话重连失败。")
+            self._refresh_voice_ui()
+            self._refresh_interaction_state()
+            return
+        self.voice_session_config = session_config
+        self.voice_room = session_config.room
+        self.voice_user_identity = session_config.user_identity
+        self.voice_client_state = "connecting"
+        self.voice_client_detail = "已拿到新的 token，正在重新接入语音会话。"
+        self._append_voice_event(f"重连 token 已下发：session={session_config.session_id}")
+        self._attach_voice_client(session_config)
+        self.voice_window.set_running(True)
+        self._refresh_voice_ui()
+        self._refresh_interaction_state()
+
+    def _on_voice_client_thread_finished(self) -> None:
+        sender = self.sender()
+        if self.voice_client_thread is not None and sender is self.voice_client_thread:
+            self.voice_client_thread.deleteLater()
+            self.voice_client_thread = None
+        if not self._voice_assistant_running() and self.voice_client_state in {"idle", "error"}:
+            self.voice_window.set_running(False)
+            self._refresh_interaction_state()
+
     def _refresh_voice_ui(self) -> None:
-        if self.voice_process is not None:
-            self._voice_assistant_running()
-        status = load_voice_status(self.voice_status_store)
+        user_muted = self.voice_window.is_user_muted()
+        user_state = "idle"
+        agent_state = "idle"
+        now = time.monotonic()
+        if self.voice_client_state in {"checking_backend", "creating_session", "connecting", "closing"}:
+            agent_state = "initializing"
+        elif self.voice_client_state in {"waiting_agent", "ready", "reconnecting"}:
+            user_state = "idle" if user_muted else "listening"
+            agent_state = "listening" if self.voice_agent_present else "initializing"
+
+        if self.voice_live_captions.get("user") or now < self.voice_activity_until.get("user", 0.0):
+            user_state = "idle" if user_muted else "speaking"
+        if self.voice_live_captions.get("assistant") or now < self.voice_activity_until.get("assistant", 0.0):
+            agent_state = "speaking"
+
         self.voice_window.set_runtime_state(
-            user_state=str(status.get("user_state", "idle")),
-            agent_state=str(status.get("agent_state", "idle")),
-            user_muted=bool(status.get("user_muted", False)),
+            user_state=user_state,
+            agent_state=agent_state,
+            user_muted=user_muted,
         )
-        self.voice_window.set_transcript_lines(load_voice_transcript_lines(self.voice_transcript_store, limit=80))
+        self.voice_window.set_connection_detail(self.voice_client_detail)
+        self.voice_window.set_session_config(self.voice_session_config)
+        self.voice_window.set_event_lines(self.voice_event_lines)
+        self.voice_window.set_transcript_lines(
+            self.voice_transcript_lines,
+            live_captions=self.voice_live_captions,
+            live_caption_timestamps=self.voice_live_caption_timestamps,
+        )
 
     def _select_target(self, point_x: int, point_y: int) -> None:
         if self.runtime.select_target_at(point_x, point_y):
@@ -3176,28 +3550,10 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
 
         self.latest_snapshot = snapshot
         self.history_points.append(build_history_point(snapshot, time.monotonic()))
-        self._sample_voice_frame(snapshot)
         self.video_widget.set_frame(render_preview_frame(snapshot))
+        self._capture_voice_image_snapshot(snapshot)
         self._update_status_labels(snapshot)
         self._push_insights_snapshot(snapshot)
-
-    def _sample_voice_frame(self, snapshot: RuntimeSnapshot, *, force: bool = False) -> None:
-        now = time.monotonic()
-        if not force and not should_sample_frame(self.voice_last_sample_monotonic, now):
-            return
-        try:
-            write_latest_voice_frame(
-                self.voice_frame_store,
-                snapshot.frame,
-                tracking_state=snapshot.tracking_state,
-                bbox=snapshot.tracked_bbox,
-                target_angle=snapshot.target_angle,
-                output_angle=snapshot.output_angle,
-            )
-        except Exception as exc:
-            self._log(f"Voice frame sampling failed: {exc}")
-            return
-        self.voice_last_sample_monotonic = now
 
     def _update_status_labels(
         self,
@@ -3268,7 +3624,12 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
     def _refresh_interaction_state(self, snapshot: RuntimeSnapshot | None = None) -> None:
         camera_open = self.runtime.camera_source is not None
         serial_connected = self.runtime.serial_client is not None
-        voice_running = self._voice_assistant_running()
+        voice_running = self._voice_assistant_running() or self.voice_session_config is not None or self.voice_client_state in {
+            "checking_backend",
+            "creating_session",
+            "reconnecting",
+            "closing",
+        }
         active_snapshot = snapshot or self.latest_snapshot
         button_state = build_desktop_button_state(
             has_camera_source=bool(self._selected_camera_source()),

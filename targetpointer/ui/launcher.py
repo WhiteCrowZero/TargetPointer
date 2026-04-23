@@ -110,8 +110,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             }
             QFrame#LauncherHeader {
                 background: #ffffff;
-                border: 1px solid #dfe7f0;
-                border-radius: 22px;
+                border: none;
+                border-radius: 24px;
             }
             QLabel#LauncherTitle {
                 font-size: 32px;
@@ -125,13 +125,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
             QPushButton#LauncherTile {
                 text-align: left;
                 background: #ffffff;
-                border: 1px solid #dfe7f0;
-                border-radius: 18px;
+                border: none;
+                border-radius: 22px;
                 color: #111b2b;
             }
             QPushButton#LauncherTile:hover {
                 background: #f8fbff;
-                border: 1px solid #b7cae3;
+                border: none;
             }
             QLabel#LauncherTileTitle {
                 font-size: 20px;
