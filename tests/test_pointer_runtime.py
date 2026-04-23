@@ -81,7 +81,7 @@ class PointerRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.last_output_angle, 80)
         self.assertEqual(snapshot.target_angle, 81)
 
-    def test_runtime_sends_tracking_indicator_only_on_stage_transition(self) -> None:
+    def test_runtime_sends_device_state_only_on_stage_transition(self) -> None:
         runtime = PointerRuntime(detector=object(), model_name="test-model", detect_every=10)
         fake_frame = type("FakeFrame", (), {"shape": (480, 640, 3)})()
         runtime.capture = type("FakeCapture", (), {"read": lambda self: (True, fake_frame), "release": lambda self: None})()
@@ -102,7 +102,7 @@ class PointerRuntimeTests(unittest.TestCase):
             pointer_runtime.compute_servo_angle = lambda center, width, last_angle, args: 96
 
             runtime.process_next_frame()
-            self.assertIn("LED:ON", commands)
+            self.assertIn("STATE:LOCK", commands)
             self.assertIn("ANGLE:96", commands)
 
             commands.clear()
@@ -114,7 +114,7 @@ class PointerRuntimeTests(unittest.TestCase):
 
         self.assertEqual(commands, [])
 
-    def test_runtime_turns_indicator_off_when_target_is_lost(self) -> None:
+    def test_runtime_sends_lost_state_when_target_is_lost(self) -> None:
         runtime = PointerRuntime(detector=object(), model_name="test-model", detect_every=1, on_loss="stop")
         fake_frame = type("FakeFrame", (), {"shape": (480, 640, 3)})()
         runtime.capture = type("FakeCapture", (), {"read": lambda self: (True, fake_frame), "release": lambda self: None})()
@@ -126,7 +126,7 @@ class PointerRuntimeTests(unittest.TestCase):
         runtime.state.tracking_state = pointer_runtime.STATE_REACQUIRING
         runtime.state.last_match_success = False
         runtime.missed_frames = runtime.args.reacquire_frames - 1
-        runtime.tracking_indicator_active = True
+        runtime.device_mode_active = "LOCK"
 
         commands: list[str] = []
         original_send = pointer_runtime.send_control_command
@@ -141,7 +141,28 @@ class PointerRuntimeTests(unittest.TestCase):
 
         self.assertEqual(snapshot.tracking_state, pointer_runtime.STATE_LOST)
         self.assertIn("STOP", commands)
-        self.assertIn("LED:OFF", commands)
+        self.assertIn("STATE:LOST", commands)
+
+    def test_runtime_does_not_fallback_to_deprecated_led_commands(self) -> None:
+        runtime = PointerRuntime(detector=object(), model_name="test-model")
+        runtime.serial_client = object()
+        runtime.serial_port = "COM4"
+
+        commands: list[str] = []
+        original_send = pointer_runtime.send_control_command
+        try:
+            def fake_send(client, command, **kwargs):
+                commands.append(command)
+                raise pointer_runtime.PointerSerialError(f"{command} -> ERR:BAD_CMD")
+
+            pointer_runtime.send_control_command = fake_send
+            responses = runtime._sync_device_state(force=True)
+        finally:
+            pointer_runtime.send_control_command = original_send
+
+        self.assertEqual(responses, [])
+        self.assertEqual(commands, ["STATE:SEARCH"])
+        self.assertFalse(runtime.device_state_supported)
 
     def test_connect_serial_queries_status_without_centering(self) -> None:
         runtime = PointerRuntime(detector=object(), model_name="test-model")
@@ -174,7 +195,7 @@ class PointerRuntimeTests(unittest.TestCase):
             pointer_runtime.PointerSerialClient = original_client
             pointer_runtime.send_control_command = original_send
 
-        self.assertEqual(commands, ["STATUS?", "LED:OFF"])
+        self.assertEqual(commands, ["STATUS?", "STATE:SEARCH"])
         self.assertIn("BOOT", responses)
         self.assertIsNone(runtime.last_output_angle)
 
@@ -185,7 +206,7 @@ class PointerRuntimeTests(unittest.TestCase):
         runtime.last_output_angle = 135
         runtime.tracked_bbox = (10, 10, 50, 100)
         runtime.state.tracking_state = pointer_runtime.STATE_LOCKED
-        runtime.tracking_indicator_active = True
+        runtime.device_mode_active = "LOCK"
 
         original_send = pointer_runtime.send_control_command
         commands: list[str] = []
@@ -201,7 +222,7 @@ class PointerRuntimeTests(unittest.TestCase):
         finally:
             pointer_runtime.send_control_command = original_send
 
-        self.assertEqual(commands, ["CENTER", "STATUS?", "LED:OFF"])
+        self.assertEqual(commands, ["CENTER", "STATUS?", "STATE:SEARCH"])
         self.assertEqual(responses[0], "OK:CENTER")
         self.assertTrue(runtime.center_pending)
         self.assertEqual(runtime.state.tracking_state, pointer_runtime.STATE_CENTERING)
@@ -236,7 +257,7 @@ class PointerRuntimeTests(unittest.TestCase):
         finally:
             pointer_runtime.send_control_command = original_send
 
-        self.assertEqual(commands, ["STATUS?"])
+        self.assertEqual(commands, ["STATUS?", "STATE:SEARCH"])
         self.assertEqual(snapshot.tracking_state, pointer_runtime.STATE_CENTERING)
         self.assertTrue(runtime.center_pending)
         self.assertEqual(snapshot.output_angle, 120)
@@ -288,7 +309,7 @@ class PointerRuntimeTests(unittest.TestCase):
             pointer_runtime.send_control_command = original_send
             pointer_runtime.time.sleep = original_sleep
 
-        self.assertEqual(commands, ["STATUS?", "LED:OFF", "CENTER", "STATUS?", "STOP"])
+        self.assertEqual(commands, ["STATUS?", "STATE:IDLE", "CENTER", "STATUS?", "STOP"])
         self.assertTrue(client.closed)
         self.assertIsNone(runtime.serial_client)
         self.assertEqual(runtime.state.tracking_state, pointer_runtime.STATE_SELECTING)
@@ -322,7 +343,7 @@ class PointerRuntimeTests(unittest.TestCase):
         finally:
             pointer_runtime.send_control_command = original_send
 
-        self.assertEqual(commands, ["STATUS?", "LED:OFF", "STOP"])
+        self.assertEqual(commands, ["STATUS?", "STATE:IDLE", "STOP"])
         self.assertTrue(client.closed)
         self.assertIsNone(runtime.serial_client)
 

@@ -60,7 +60,7 @@ class PointerVisionAppTests(unittest.TestCase):
 
         angle = module.compute_servo_angle((0.0, 0.0), 640, 90, args)
 
-        self.assertEqual(angle, 84)
+        self.assertEqual(angle, 96)
 
     def test_compute_servo_angle_uses_smaller_steps_near_target(self) -> None:
         module = load_pointer_vision_app()
@@ -79,7 +79,7 @@ class PointerVisionAppTests(unittest.TestCase):
 
         angle = module.compute_servo_angle((274.0, 0.0), 640, 82, args)
 
-        self.assertEqual(angle, 82)
+        self.assertEqual(angle, 85)
 
     def test_attempt_match_falls_back_to_relaxed_reacquire(self) -> None:
         module = load_pointer_vision_app()
@@ -166,7 +166,34 @@ class PointerVisionAppTests(unittest.TestCase):
             module.send_control_command = original_send
             module.time.sleep = original_sleep
 
-        self.assertEqual(commands, ["STATUS?", "LED:OFF", "CENTER", "STATUS?", "STOP"])
+        self.assertEqual(commands, ["STATUS?", "STATE:IDLE", "CENTER", "STATUS?", "STOP"])
+
+    def test_sync_device_state_does_not_fallback_to_deprecated_led_commands(self) -> None:
+        module = load_pointer_vision_app()
+        original_send = module.send_control_command
+        commands: list[str] = []
+
+        try:
+            def fake_send(serial_client, command, **kwargs):
+                commands.append(command)
+                raise module.PointerSerialError(f"{command} -> ERR:BAD_CMD")
+
+            module.send_control_command = fake_send
+            responses, active_mode, supported = module.sync_device_state(
+                object(),
+                mode="LOCK",
+                active_mode=None,
+                state_supported=True,
+                response_timeout=0.25,
+                idle_timeout=0.05,
+            )
+        finally:
+            module.send_control_command = original_send
+
+        self.assertEqual(responses, [])
+        self.assertIsNone(active_mode)
+        self.assertFalse(supported)
+        self.assertEqual(commands, ["STATE:LOCK"])
 
     def test_build_camera_candidates_prefers_windows_backends_for_indices(self) -> None:
         module = load_pointer_vision_app()
@@ -267,7 +294,7 @@ class PointerVisionAppTests(unittest.TestCase):
         module.sys.platform = "win32"
         module.cv2.VideoCapture = fake_video_capture
         try:
-            cameras = module.list_available_cameras(2, "auto")
+            cameras = module.list_available_cameras(2, "auto", probe_frames=True)
         finally:
             module.sys.platform = original_platform
             if original_factory is None:

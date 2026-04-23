@@ -80,7 +80,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         grid.setVerticalSpacing(16)
 
         self.live_tile = LauncherTile("Live Control", "Camera, serial connection, target selection, and device control.")
-        self.voice_tile = LauncherTile("Voice Assistant", "LiveKit voice conversation with ElevenLabs STT and configurable voice settings.")
+        self.voice_tile = LauncherTile("Voice Assistant", "LiveKit pipeline voice conversation with subtitles and user mute control.")
         self.report_tile = LauncherTile("Target Report", "Generate and inspect the selected person PDF report.")
         self.insights_tile = LauncherTile("Data Analysis", "Tracking state, servo angle, detection, and match-quality trends.")
 
@@ -163,7 +163,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TargetPointer workbench launcher.")
     parser.add_argument("--model", default="yolov8n.pt", help="YOLO model path or model name.")
-    parser.add_argument("--port", help="Serial port to auto-connect, for example COM4.")
+    parser.add_argument("--port", help="Serial port to select on startup, for example COM4.")
+    parser.add_argument("--auto-connect", action="store_true", help="Connect the selected serial port at startup.")
     parser.add_argument("--camera", help="Camera source to auto-open, for example 0.")
     parser.add_argument(
         "--camera-backend",
@@ -185,7 +186,12 @@ def main() -> int:
     app.setWindowIcon(build_arrow_icon(WINDOW_ICON_TEXT))
 
     runtime = build_runtime_from_args(args)
-    live_window = PointerDesktopWindow(runtime, initial_camera=args.camera, initial_port=args.port)
+    live_window = PointerDesktopWindow(
+        runtime,
+        initial_camera=args.camera,
+        initial_port=args.port,
+        auto_connect_serial=args.auto_connect or args.port is not None,
+    )
     live_window.show()
     return app.exec()
 

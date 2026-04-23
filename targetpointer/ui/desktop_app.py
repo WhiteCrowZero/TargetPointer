@@ -6,11 +6,13 @@ import argparse
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import time
+from typing import IO
 
 try:
     import cv2
@@ -47,10 +49,18 @@ from targetpointer.reporting.report import (
     request_target_report_analysis,
 )
 from targetpointer.voice.agent import (
+    DEFAULT_CONTROL_STORE,
     DEFAULT_FRAME_STORE,
+    DEFAULT_STATUS_STORE,
+    DEFAULT_TRANSCRIPT_STORE,
+    clear_voice_transcript,
+    load_voice_status,
+    load_voice_transcript_lines,
     missing_voice_env_vars,
     should_sample_frame,
     voice_config_defaults_from_env,
+    write_voice_control,
+    write_voice_status,
     write_latest_voice_frame,
 )
 from targetpointer.voice.agent import DEFAULT_TTS_SPEED, VoiceAssistantConfig
@@ -76,6 +86,53 @@ TRACKING_TONES = {
     "centering": "warm",
     "lost": "danger",
 }
+
+
+class PolishedComboBox(QtWidgets.QComboBox):
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        pen = QtGui.QPen(QtGui.QColor("#28608f"))
+        pen.setWidthF(1.8)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        painter.setPen(pen)
+
+        center_x = self.width() - 22
+        center_y = self.height() / 2
+        points = QtGui.QPolygonF(
+            [
+                QtCore.QPointF(center_x - 4, center_y - 2),
+                QtCore.QPointF(center_x, center_y + 2),
+                QtCore.QPointF(center_x + 4, center_y - 2),
+            ]
+        )
+        painter.drawPolyline(points)
+
+
+class ComboItemDelegate(QtWidgets.QStyledItemDelegate):
+    def sizeHint(self, option: QtWidgets.QStyleOptionViewItem, index: QtCore.QModelIndex) -> QtCore.QSize:
+        size = super().sizeHint(option, index)
+        size.setHeight(max(size.height(), 38))
+        return size
+
+
+def configure_combo_box(combo: QtWidgets.QComboBox, *, min_popup_width: int = 260, max_visible_items: int = 8) -> None:
+    combo.setMinimumHeight(42)
+    combo.setMaxVisibleItems(max_visible_items)
+    combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+
+    popup_view = QtWidgets.QListView(combo)
+    popup_view.setObjectName("ComboPopupList")
+    popup_view.setMinimumWidth(min_popup_width)
+    popup_view.setSpacing(4)
+    popup_view.setTextElideMode(QtCore.Qt.ElideMiddle)
+    popup_view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+    popup_view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+    popup_view.setFrameShape(QtWidgets.QFrame.NoFrame)
+    combo.setView(popup_view)
+    combo.setItemDelegate(ComboItemDelegate(combo))
 
 
 @dataclass(frozen=True)
@@ -691,7 +748,7 @@ class ReportWindow(QtWidgets.QWidget):
 
     def __init__(self) -> None:
         super().__init__(None)
-        self.setWindowTitle("TargetPointer Report")
+        self.setWindowTitle("TargetPointer 报告")
         self._build_ui()
         self._apply_styles()
 
@@ -706,16 +763,16 @@ class ReportWindow(QtWidgets.QWidget):
         header_layout.setContentsMargins(20, 16, 20, 16)
         title_stack = QtWidgets.QVBoxLayout()
         title_stack.setSpacing(2)
-        title = QtWidgets.QLabel("Target Report")
+        title = QtWidgets.QLabel("目标报告")
         title.setObjectName("ReportTitle")
-        self.subtitle = QtWidgets.QLabel("Generate a report to inspect the selected target.")
+        self.subtitle = QtWidgets.QLabel("生成报告后查看选中人物和环境描述。")
         self.subtitle.setObjectName("ReportSubtitle")
         title_stack.addWidget(title)
         title_stack.addWidget(self.subtitle)
-        self.path_label = QtWidgets.QLabel("No PDF generated")
+        self.path_label = QtWidgets.QLabel("尚未生成 PDF")
         self.path_label.setObjectName("ReportPath")
         self.path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.generate_button = QtWidgets.QPushButton("Generate Report")
+        self.generate_button = QtWidgets.QPushButton("生成报告")
         self.generate_button.setObjectName("PrimaryButton")
         self.generate_button.setEnabled(False)
         self.generate_button.clicked.connect(self.generate_requested.emit)
@@ -726,8 +783,8 @@ class ReportWindow(QtWidgets.QWidget):
 
         image_row = QtWidgets.QHBoxLayout()
         image_row.setSpacing(14)
-        self.target_image = ScaledImageLabel("Target crop")
-        self.context_image = ScaledImageLabel("Scene context")
+        self.target_image = ScaledImageLabel("目标裁剪")
+        self.context_image = ScaledImageLabel("场景上下文")
         image_row.addWidget(self.target_image, stretch=1)
         image_row.addWidget(self.context_image, stretch=2)
 
@@ -740,13 +797,13 @@ class ReportWindow(QtWidgets.QWidget):
         content_layout.setSpacing(12)
         self.sections: dict[str, QtWidgets.QLabel] = {}
         for key, label in [
-            ("overall", "Overall Description"),
-            ("features", "Visible Features"),
-            ("pose", "Position and Pose"),
-            ("environment", "Environment and Activity"),
-            ("confidence", "Confidence"),
-            ("cautions", "Cautions"),
-            ("status", "System Status"),
+            ("overall", "总体描述"),
+            ("features", "可见特征"),
+            ("pose", "位置与姿态"),
+            ("environment", "背景环境与当前活动"),
+            ("confidence", "可信度说明"),
+            ("cautions", "注意事项"),
+            ("status", "系统状态"),
         ]:
             card = QtWidgets.QFrame()
             card.setObjectName("ReportSection")
@@ -856,7 +913,7 @@ class ReportWindow(QtWidgets.QWidget):
         self.generate_button.setEnabled(enabled)
 
     def set_generating(self, generating: bool) -> None:
-        self.generate_button.setText("Generating..." if generating else "Generate Report")
+        self.generate_button.setText("生成中..." if generating else "生成报告")
         self.generate_button.setEnabled(not generating)
 
     def update_report(self, report: GeneratedReport) -> None:
@@ -879,13 +936,13 @@ class ReportWindow(QtWidgets.QWidget):
         if status is None:
             return "—"
         return (
-            f"Tracking: {status.tracking_state}\n"
-            f"BBox: {status.bbox}\n"
-            f"Target angle: {format_metric(status.target_angle)}\n"
-            f"Servo output: {format_metric(status.output_angle)}\n"
-            f"Missed frames: {status.missed_frames}; detections: {status.detection_count}\n"
-            f"Camera: {status.camera_source or 'unknown'} / {status.camera_backend or 'unknown'}\n"
-            f"Serial: {status.serial_port if status.serial_connected and status.serial_port else 'not connected'}"
+            f"跟踪状态：{status.tracking_state}\n"
+            f"目标框：{status.bbox}\n"
+            f"目标角：{format_metric(status.target_angle)}\n"
+            f"舵机输出：{format_metric(status.output_angle)}\n"
+            f"丢失帧数：{status.missed_frames}；检测数：{status.detection_count}\n"
+            f"摄像头：{status.camera_source or '未知'} / {status.camera_backend or '未知'}\n"
+            f"串口：{status.serial_port if status.serial_connected and status.serial_port else '未连接'}"
         )
 
 
@@ -894,12 +951,17 @@ class VoiceWaveform(QtWidgets.QWidget):
         super().__init__()
         self.tone = tone
         self.state = "idle"
+        self.muted = False
         self.phase = 0
         self.pattern = [0.42, 0.58, 0.74, 0.88, 0.7, 0.5, 0.36, 0.52, 0.68, 0.86, 0.78, 0.6]
-        self.setMinimumHeight(178)
+        self.setMinimumHeight(150)
 
     def set_state(self, state: str) -> None:
         self.state = state
+        self.update()
+
+    def set_muted(self, muted: bool) -> None:
+        self.muted = muted
         self.update()
 
     def advance(self) -> None:
@@ -915,19 +977,19 @@ class VoiceWaveform(QtWidgets.QWidget):
         painter.setBrush(QtGui.QColor("#f8fbff"))
         painter.drawRoundedRect(rect, 22, 22)
 
-        active = self.state in {"listening", "thinking", "speaking"}
+        active = self.state in {"listening", "thinking", "speaking"} and not self.muted
         base_color = QtGui.QColor("#0d9488" if self.tone == "user" else "#2563eb")
-        muted_color = QtGui.QColor("#aab6c8")
-        bar_width = 14
-        gap = 10
+        muted_color = QtGui.QColor("#aab6c8" if not self.muted else "#d16b6b")
+        bar_width = 12
+        gap = 9
         total_width = len(self.pattern) * bar_width + (len(self.pattern) - 1) * gap
         start_x = rect.center().x() - total_width / 2
         bottom = rect.bottom() - 14
 
         for index, factor in enumerate(self.pattern):
             wave = 0.5 + 0.5 * abs(((self.phase + index * 7) % 24) - 12) / 12
-            multiplier = 0.55 if self.state == "idle" else 0.82 if self.state != "speaking" else 1.05 + wave * 0.42
-            height = int((44 + factor * 86) * multiplier)
+            multiplier = 0.18 if self.muted else 0.55 if self.state == "idle" else 0.82 if self.state != "speaking" else 1.05 + wave * 0.42
+            height = int((38 + factor * 72) * multiplier)
             x = int(start_x + index * (bar_width + gap))
             y = bottom - height
             color = QtGui.QColor(base_color if active else muted_color)
@@ -940,10 +1002,12 @@ class VoiceWaveform(QtWidgets.QWidget):
 class VoiceAssistantWindow(QtWidgets.QWidget):
     start_requested = QtCore.Signal(object)
     stop_requested = QtCore.Signal()
+    mute_changed = QtCore.Signal(bool)
 
     def __init__(self) -> None:
         super().__init__(None)
         self.setWindowTitle("TargetPointer Voice Assistant")
+        self.running = False
         self._build_ui()
         self._apply_styles()
         self.animation_timer = QtCore.QTimer(self)
@@ -962,9 +1026,9 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         header_layout.setContentsMargins(20, 16, 20, 16)
         title_stack = QtWidgets.QVBoxLayout()
         title_stack.setSpacing(2)
-        title = QtWidgets.QLabel("Voice Assistant")
+        title = QtWidgets.QLabel("AI 实时对话")
         title.setObjectName("VoiceTitle")
-        self.detail_label = QtWidgets.QLabel("Configure the pipeline, then start the LiveKit worker.")
+        self.detail_label = QtWidgets.QLabel("启动后由 LiveKit worker 接入实时房间，字幕在下方滚动显示。")
         self.detail_label.setObjectName("VoiceSubtitle")
         title_stack.addWidget(title)
         title_stack.addWidget(self.detail_label)
@@ -982,9 +1046,31 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         channel_row.setSpacing(12)
         self.user_wave = VoiceWaveform("user")
         self.agent_wave = VoiceWaveform("agent")
-        channel_row.addWidget(self._build_channel("User", self.user_wave), stretch=1)
+        channel_row.addWidget(self._build_channel("用户", self.user_wave), stretch=1)
         channel_row.addWidget(self._build_channel("AI", self.agent_wave), stretch=1)
         stage_layout.addLayout(channel_row)
+
+        transcript_header = QtWidgets.QHBoxLayout()
+        transcript_header.setSpacing(10)
+        transcript_label = QtWidgets.QLabel("实时字幕")
+        transcript_label.setObjectName("VoiceChannelTitle")
+        self.mute_checkbox = QtWidgets.QCheckBox("静音用户麦克风")
+        self.mute_checkbox.setObjectName("VoiceMuteCheck")
+        self.mute_checkbox.toggled.connect(self.mute_changed.emit)
+        transcript_header.addWidget(transcript_label)
+        transcript_header.addStretch(1)
+        transcript_header.addWidget(self.mute_checkbox)
+
+        self.transcript_log = QtWidgets.QPlainTextEdit()
+        self.transcript_log.setObjectName("VoiceTranscriptLog")
+        self.transcript_log.setReadOnly(True)
+        self.transcript_log.setMaximumBlockCount(160)
+        self.transcript_log.setPlaceholderText("实时字幕会显示在这里。")
+        self.transcript_log.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
+        self.transcript_log.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.transcript_log.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
+        stage_layout.addLayout(transcript_header)
+        stage_layout.addWidget(self.transcript_log, stretch=1)
 
         config = QtWidgets.QFrame()
         config.setObjectName("VoiceConfig")
@@ -1006,25 +1092,40 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         )
         self.max_tokens_input.setValidator(QtGui.QIntValidator(1, 8000, self.max_tokens_input))
         self.tts_model_input = self._config_text_input(f"Default: {self.default_config.tts_model}")
-        self.tts_voice_combo = QtWidgets.QComboBox()
+        self.tts_voice_combo = PolishedComboBox()
         self.tts_voice_combo.setObjectName("VoiceSelect")
         for voice_name, voice_id in voice_choices(self.default_config.tts_voice):
             self.tts_voice_combo.addItem(voice_name, voice_id)
+        configure_combo_box(self.tts_voice_combo, min_popup_width=300)
         voice_index = self.tts_voice_combo.findData(self.default_config.tts_voice)
         if voice_index >= 0:
             self.tts_voice_combo.setCurrentIndex(voice_index)
         self.tts_speed_input = self._config_text_input(f"Default: {self.default_config.tts_speed:g}")
         self.tts_speed_input.setValidator(QtGui.QDoubleValidator(0.25, 4.0, 3, self.tts_speed_input))
+        self.eleven_stability_input = self._config_text_input(f"Default: {self.default_config.eleven_stability:g}")
+        self.eleven_stability_input.setValidator(QtGui.QDoubleValidator(0.0, 1.0, 3, self.eleven_stability_input))
+        self.eleven_similarity_input = self._config_text_input(
+            f"Default: {self.default_config.eleven_similarity_boost:g}"
+        )
+        self.eleven_similarity_input.setValidator(QtGui.QDoubleValidator(0.0, 1.0, 3, self.eleven_similarity_input))
+        self.vad_threshold_input = self._config_text_input(f"Default: {self.default_config.vad_activation_threshold:g}")
+        self.vad_threshold_input.setValidator(QtGui.QDoubleValidator(0.3, 0.95, 3, self.vad_threshold_input))
+        self.vad_silence_input = self._config_text_input(f"Default: {self.default_config.vad_silence_duration_ms}")
+        self.vad_silence_input.setValidator(QtGui.QIntValidator(150, 1600, self.vad_silence_input))
 
         fields = [
-            ("STT Model", self.stt_model_input),
-            ("STT Language", self.stt_language_input),
-            ("LLM Model", self.llm_model_input),
-            ("Temperature", self.temperature_input),
-            ("Max Output Tokens", self.max_tokens_input),
-            ("TTS Model", self.tts_model_input),
+            ("转写模型", self.stt_model_input),
+            ("语言", self.stt_language_input),
+            ("LLM 模型", self.llm_model_input),
+            ("温度", self.temperature_input),
+            ("最大输出", self.max_tokens_input),
+            ("TTS 模型", self.tts_model_input),
             ("人物音色", self.tts_voice_combo),
-            ("TTS Speed", self.tts_speed_input),
+            ("语速", self.tts_speed_input),
+            ("音色稳定度", self.eleven_stability_input),
+            ("相似度增强", self.eleven_similarity_input),
+            ("VAD 阈值", self.vad_threshold_input),
+            ("静音判定 ms", self.vad_silence_input),
         ]
         for index, (label, widget) in enumerate(fields):
             row = index // 2
@@ -1037,9 +1138,9 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(10)
         actions.addStretch(1)
-        self.start_button = QtWidgets.QPushButton("Start")
+        self.start_button = QtWidgets.QPushButton("启动")
         self.start_button.setObjectName("PrimaryButton")
-        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button = QtWidgets.QPushButton("停止")
         self.stop_button.setObjectName("GhostButton")
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.config()))
@@ -1089,7 +1190,7 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             QFrame#VoiceChannel {
                 background: rgba(255, 255, 255, 188);
                 border: 1px solid rgba(147, 197, 253, 135);
-                border-radius: 22px;
+                border-radius: 18px;
             }
             QLabel#VoiceTitle {
                 font-size: 24px;
@@ -1111,34 +1212,78 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             QComboBox {
                 background: rgba(255, 255, 255, 205);
                 border: 1px solid #bfdbfe;
-                border-radius: 12px;
-                padding: 8px 10px;
+                border-radius: 8px;
+                min-height: 22px;
+                padding: 7px 34px 7px 10px;
                 color: #0f2746;
                 placeholder-text-color: #8aaac8;
+                selection-background-color: #dbeafe;
             }
             QComboBox::drop-down {
                 border: none;
-                width: 30px;
-                border-top-right-radius: 12px;
-                border-bottom-right-radius: 12px;
+                width: 32px;
+                background: transparent;
             }
             QComboBox::down-arrow {
                 image: none;
                 width: 0px;
                 height: 0px;
             }
+            QListView#ComboPopupList,
             QComboBox QAbstractItemView {
                 background: #ffffff;
                 border: 1px solid #bfdbfe;
-                border-radius: 12px;
-                padding: 6px;
-                selection-background-color: #dbeafe;
-                selection-color: #0f2746;
+                border-radius: 8px;
+                padding: 8px;
+                color: #173b61;
+                outline: 0;
+                selection-background-color: #e0f2fe;
+                selection-color: #0756a6;
+            }
+            QListView#ComboPopupList::item {
+                min-height: 34px;
+                padding: 8px 10px;
+                border-radius: 8px;
+            }
+            QListView#ComboPopupList::item:hover {
+                background: #eff8ff;
+                color: #0756a6;
+            }
+            QListView#ComboPopupList::item:selected {
+                background: #dbeafe;
+                color: #0756a6;
             }
             QPushButton {
-                border-radius: 14px;
-                padding: 10px 18px;
+                border-radius: 10px;
+                padding: 9px 16px;
                 font-weight: 700;
+            }
+            QCheckBox#VoiceMuteCheck {
+                color: #17466f;
+                font-size: 12px;
+                font-weight: 700;
+                spacing: 8px;
+            }
+            QCheckBox#VoiceMuteCheck::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #93c5fd;
+                background: #ffffff;
+            }
+            QCheckBox#VoiceMuteCheck::indicator:checked {
+                background: #1d73d4;
+                border: 1px solid #1d73d4;
+            }
+            QPlainTextEdit#VoiceTranscriptLog {
+                background: rgba(8, 36, 61, 218);
+                color: #eaf5ff;
+                border: 1px solid rgba(147, 197, 253, 155);
+                border-radius: 14px;
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 13px;
+                padding: 12px;
+                selection-background-color: #1d73d4;
             }
             QPushButton#PrimaryButton {
                 background: #1d73d4;
@@ -1173,6 +1318,15 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
                 font-size: 12px;
                 font-weight: 700;
             }
+            QLabel[ tone="warm" ] {
+                background: #fff7ed;
+                color: #b45309;
+                border: 1px solid #fed7aa;
+                border-radius: 999px;
+                padding: 7px 13px;
+                font-size: 12px;
+                font-weight: 700;
+            }
             """
         )
 
@@ -1186,6 +1340,25 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
             tts_model=self.tts_model_input.text().strip() or self.default_config.tts_model,
             tts_voice=str(self.tts_voice_combo.currentData() or self.default_config.tts_voice),
             tts_speed=self._optional_float(self.tts_speed_input, self.default_config.tts_speed) or DEFAULT_TTS_SPEED,
+            eleven_stability=self._optional_float(
+                self.eleven_stability_input,
+                self.default_config.eleven_stability,
+            ),
+            eleven_similarity_boost=self._optional_float(
+                self.eleven_similarity_input,
+                self.default_config.eleven_similarity_boost,
+            ),
+            vad_activation_threshold=self._optional_float(
+                self.vad_threshold_input,
+                self.default_config.vad_activation_threshold,
+            )
+            or self.default_config.vad_activation_threshold,
+            vad_silence_duration_ms=self._optional_int(
+                self.vad_silence_input,
+                self.default_config.vad_silence_duration_ms,
+            )
+            or self.default_config.vad_silence_duration_ms,
+            vad_prefix_padding_ms=self.default_config.vad_prefix_padding_ms,
         )
 
     def _optional_float(self, input_widget: QtWidgets.QLineEdit, default: float | None) -> float | None:
@@ -1197,16 +1370,56 @@ class VoiceAssistantWindow(QtWidgets.QWidget):
         return default if not text else int(text)
 
     def set_running(self, running: bool) -> None:
+        self.running = running
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
-        self.status_badge.set_badge("Running" if running else "Stopped", "good" if running else "soft")
-        self.user_wave.set_state("listening" if running else "idle")
-        self.agent_wave.set_state("speaking" if running else "idle")
+        self.mute_checkbox.setEnabled(running)
+        self.status_badge.set_badge("运行中" if running else "已停止", "good" if running else "soft")
+        if not running:
+            self.user_wave.set_state("idle")
+            self.agent_wave.set_state("idle")
         self.detail_label.setText(
-            "LiveKit worker running. Latest camera frame is sampled into each user turn."
+            "LiveKit worker 已运行，最新画面会注入到用户回合中。"
             if running
-            else "Configure the pipeline, then start the LiveKit worker."
+            else "启动后由 LiveKit worker 接入实时房间，字幕在下方滚动显示。"
         )
+
+    def set_runtime_state(self, *, user_state: str, agent_state: str, user_muted: bool) -> None:
+        if not self.running:
+            return
+        if self.mute_checkbox.isChecked() != user_muted:
+            self.mute_checkbox.blockSignals(True)
+            self.mute_checkbox.setChecked(user_muted)
+            self.mute_checkbox.blockSignals(False)
+        self.user_wave.set_muted(user_muted)
+        self.user_wave.set_state("idle" if user_muted else user_state)
+        self.agent_wave.set_state(agent_state)
+
+        if user_muted:
+            label = "用户麦克风已静音"
+        elif agent_state == "speaking":
+            label = "AI 正在回答"
+        elif agent_state == "thinking":
+            label = "AI 正在思考"
+        elif user_state == "speaking":
+            label = "正在接收用户语音"
+        else:
+            label = "正在监听"
+        self.status_badge.set_badge(label, "warm" if user_muted else "good")
+
+    def set_transcript_lines(self, lines: list[object]) -> None:
+        formatted: list[str] = []
+        role_names = {"user": "用户", "assistant": "AI", "system": "系统"}
+        for line in lines:
+            role = role_names.get(getattr(line, "role", "system"), str(getattr(line, "role", "system")))
+            text = str(getattr(line, "text", "")).strip()
+            if text:
+                formatted.append(f"{role}: {text}")
+        next_text = "\n".join(formatted)
+        if self.transcript_log.toPlainText() == next_text:
+            return
+        self.transcript_log.setPlainText(next_text)
+        self.transcript_log.moveCursor(QtGui.QTextCursor.End)
 
     def _advance_animation(self) -> None:
         self.user_wave.advance()
@@ -1664,17 +1877,34 @@ class InsightsWindow(QtWidgets.QWidget):
 
 
 class PointerDesktopWindow(QtWidgets.QMainWindow):
-    def __init__(self, runtime: PointerRuntime, initial_camera: str | None, initial_port: str | None) -> None:
+    def __init__(
+        self,
+        runtime: PointerRuntime,
+        initial_camera: str | None,
+        initial_port: str | None,
+        *,
+        auto_connect_serial: bool = False,
+    ) -> None:
         super().__init__()
         self.runtime = runtime
         self.initial_camera = initial_camera
-        self.initial_port = initial_port
+        self.initial_port = initial_port or "COM4"
+        self.auto_connect_serial = auto_connect_serial
         self.latest_snapshot: RuntimeSnapshot | None = None
         self.history_points: deque[HistoryPoint] = deque(maxlen=240)
         self.report_thread: QtCore.QThread | None = None
         self.report_worker: ReportWorker | None = None
+        self.camera_scan_process: QtCore.QProcess | None = None
+        self.camera_scan_timer: QtCore.QTimer | None = None
+        self.camera_scan_previous_data: str | None = None
         self.voice_process: subprocess.Popen | None = None
-        self.voice_frame_store = Path(__file__).resolve().parents[2] / DEFAULT_FRAME_STORE
+        self.repo_root = Path(__file__).resolve().parents[2]
+        self.voice_frame_store = self.repo_root / DEFAULT_FRAME_STORE
+        self.voice_control_store = self.repo_root / DEFAULT_CONTROL_STORE
+        self.voice_transcript_store = self.repo_root / DEFAULT_TRANSCRIPT_STORE
+        self.voice_status_store = self.repo_root / DEFAULT_STATUS_STORE
+        self.voice_log_store = self.repo_root / "runtime" / "voice" / "worker.log"
+        self.voice_log_file: IO[str] | None = None
         self.voice_last_sample_monotonic: float | None = None
 
         self.setWindowTitle(WINDOW_TITLE)
@@ -1689,6 +1919,10 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.refresh_timer = QtCore.QTimer(self)
         self.refresh_timer.setInterval(33)
         self.refresh_timer.timeout.connect(self._tick)
+        self.voice_ui_timer = QtCore.QTimer(self)
+        self.voice_ui_timer.setInterval(250)
+        self.voice_ui_timer.timeout.connect(self._refresh_voice_ui)
+        self.voice_ui_timer.start()
 
         self._build_ui()
         self._apply_styles()
@@ -1704,6 +1938,8 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.refresh_timer.stop()
+        self.voice_ui_timer.stop()
+        self._cancel_camera_scan(log_event=False)
         self._stop_voice_assistant(log_event=False)
         self.runtime.close_camera()
         self.runtime.disconnect_serial()
@@ -1900,12 +2136,13 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         section = self._make_section("Connections")
         layout = section.layout()
 
-        self.camera_input = QtWidgets.QComboBox()
+        self.camera_input = PolishedComboBox()
         self.camera_input.setEditable(False)
-        self.camera_input.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        configure_combo_box(self.camera_input, min_popup_width=320)
         self.camera_input.addItem("Scan cameras first", None)
 
-        self.serial_combo = QtWidgets.QComboBox()
+        self.serial_combo = PolishedComboBox()
+        configure_combo_box(self.serial_combo, min_popup_width=260)
 
         self.backend_value = QtWidgets.QLabel(self.runtime.camera_backend_preference.upper())
         self.backend_value.setObjectName("InlineValue")
@@ -2060,6 +2297,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self.report_window.generate_requested.connect(self._generate_report)
         self.voice_window.start_requested.connect(self._start_voice_assistant)
         self.voice_window.stop_requested.connect(self._stop_voice_assistant)
+        self.voice_window.mute_changed.connect(self._set_voice_user_muted)
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -2081,7 +2319,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QFrame#Sidebar {
                 background: rgba(255, 255, 255, 178);
                 border: 1px solid rgba(147, 197, 253, 150);
-                border-radius: 28px;
+                border-radius: 18px;
             }
             QLabel#SidebarBrand {
                 color: #0756a6;
@@ -2137,7 +2375,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QFrame#DialogShell {
                 background: rgba(255, 255, 255, 188);
                 border: 1px solid rgba(147, 197, 253, 135);
-                border-radius: 24px;
+                border-radius: 18px;
             }
             QFrame#SectionShell {
                 background: transparent;
@@ -2166,7 +2404,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
                 border: 1px solid #bfdbfe;
             }
             QLabel#BrandLabel {
-                font-size: 28px;
+                font-size: 24px;
                 font-weight: 750;
                 color: #0756a6;
             }
@@ -2176,7 +2414,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
                 padding-top: 2px;
             }
             QLabel#PanelTitle {
-                font-size: 22px;
+                font-size: 19px;
                 font-weight: 700;
                 color: #0f2746;
             }
@@ -2220,7 +2458,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             }
             QLabel#GuidanceValue {
                 color: #0f2746;
-                font-size: 18px;
+                font-size: 15px;
                 font-weight: 700;
             }
             QFrame#StatTile[featured="true"] QLabel#TileValue {
@@ -2276,8 +2514,9 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             QPlainTextEdit {
                 background: rgba(255, 255, 255, 205);
                 border: 1px solid #bfdbfe;
-                border-radius: 14px;
-                padding: 10px 12px;
+                border-radius: 8px;
+                min-height: 22px;
+                padding: 8px 34px 8px 11px;
                 color: #0f2746;
                 selection-background-color: #bfdbfe;
             }
@@ -2293,20 +2532,37 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             }
             QComboBox::drop-down {
                 border: none;
-                width: 28px;
+                width: 32px;
+                background: transparent;
             }
             QComboBox::down-arrow {
                 image: none;
                 width: 0px;
                 height: 0px;
             }
+            QListView#ComboPopupList,
             QComboBox QAbstractItemView {
                 background: #ffffff;
                 border: 1px solid #bfdbfe;
-                border-radius: 14px;
-                padding: 6px;
-                selection-background-color: #dbeafe;
-                selection-color: #0f2746;
+                border-radius: 8px;
+                padding: 8px;
+                color: #173b61;
+                outline: 0;
+                selection-background-color: #e0f2fe;
+                selection-color: #0756a6;
+            }
+            QListView#ComboPopupList::item {
+                min-height: 34px;
+                padding: 8px 10px;
+                border-radius: 8px;
+            }
+            QListView#ComboPopupList::item:hover {
+                background: #eff8ff;
+                color: #0756a6;
+            }
+            QListView#ComboPopupList::item:selected {
+                background: #dbeafe;
+                color: #0756a6;
             }
             QRubberBand#SelectionBand {
                 background: rgba(37, 99, 235, 0.14);
@@ -2444,6 +2700,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             else:
                 self.serial_combo.addItem(self.initial_port)
                 self.serial_combo.setCurrentText(self.initial_port)
+        if self.auto_connect_serial and self.initial_port:
             self._connect_serial()
 
         if self.initial_camera:
@@ -2454,6 +2711,9 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
     def _refresh_serial_ports(self) -> None:
         current = self.serial_combo.currentText()
         ports = list_serial_ports()
+        for fallback_port in (current, self.initial_port, "COM4"):
+            if fallback_port and fallback_port not in ports:
+                ports.append(fallback_port)
         self.serial_combo.clear()
         self.serial_combo.addItems(ports)
         if current and current in ports:
@@ -2462,12 +2722,118 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         self._refresh_interaction_state()
 
     def _refresh_cameras(self) -> None:
-        current_data = self.camera_input.currentData()
+        if self.camera_scan_process is not None:
+            self._log("Camera scan already running")
+            return
+
+        self.camera_scan_previous_data = self.camera_input.currentData()
         self.camera_input.clear()
-        cameras = self.runtime.list_cameras()
+        self.camera_input.addItem("Scanning cameras...", None)
+        self.scan_cameras_button.setEnabled(False)
+        self._log("Camera scan started")
+        self._refresh_interaction_state()
+
+        process = QtCore.QProcess(self)
+        process.setProgram(sys.executable)
+        process.setWorkingDirectory(str(self.repo_root))
+        environment = QtCore.QProcessEnvironment.systemEnvironment()
+        existing_pythonpath = environment.value("PYTHONPATH", "")
+        pythonpath_items = [str(self.repo_root)]
+        if existing_pythonpath:
+            pythonpath_items.append(existing_pythonpath)
+        environment.insert("PYTHONPATH", os.pathsep.join(pythonpath_items))
+        process.setProcessEnvironment(environment)
+        process.setArguments(
+            [
+                "-m",
+                "targetpointer.runtime.camera_scan",
+                "--backend",
+                self.runtime.camera_backend_preference,
+                "--max-index",
+                "4",
+            ]
+        )
+        process.finished.connect(self._handle_camera_scan_finished)
+        process.errorOccurred.connect(self._handle_camera_scan_error)
+
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(8000)
+        timer.timeout.connect(self._handle_camera_scan_timeout)
+
+        self.camera_scan_process = process
+        self.camera_scan_timer = timer
+        process.start()
+        timer.start()
+
+    def _handle_camera_scan_finished(self, exit_code: int, exit_status: QtCore.QProcess.ExitStatus) -> None:
+        process = self.camera_scan_process
+        if process is None:
+            return
+
+        stdout = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+        stderr = bytes(process.readAllStandardError()).decode("utf-8", errors="replace").strip()
+        self._clear_camera_scan_process()
+
+        if exit_status != QtCore.QProcess.NormalExit or exit_code != 0:
+            self._set_camera_scan_results([])
+            self._log(f"Camera scan failed: {stderr or 'scanner exited unexpectedly'}")
+            self._show_error_toast("Camera scan failed. Try another backend.")
+            return
+
+        try:
+            raw_items = json.loads(stdout or "[]")
+            cameras = [
+                (int(item["index"]), str(item["backend"]), bool(item.get("read_ok", True)))
+                for item in raw_items
+                if isinstance(item, dict)
+            ]
+        except (TypeError, ValueError, KeyError) as exc:
+            self._set_camera_scan_results([])
+            self._log(f"Camera scan returned invalid data: {exc}")
+            self._show_error_toast("Camera scan failed. Try another backend.")
+            return
+
+        self._set_camera_scan_results(cameras)
+        self._log("Camera scan completed")
+
+    def _handle_camera_scan_error(self, _error: QtCore.QProcess.ProcessError) -> None:
+        self._clear_camera_scan_process()
+        self._set_camera_scan_results([])
+        self._log("Camera scan failed to start")
+        self._show_error_toast("Camera scan failed. Check Python environment.")
+
+    def _handle_camera_scan_timeout(self) -> None:
+        self._cancel_camera_scan(log_event=True)
+        self._set_camera_scan_results([])
+        self._show_error_toast("Camera scan timed out. Try another backend.")
+
+    def _cancel_camera_scan(self, *, log_event: bool) -> None:
+        process = self.camera_scan_process
+        if process is None:
+            return
+        if log_event:
+            self._log("Camera scan timed out")
+        process.kill()
+        process.waitForFinished(1000)
+        self._clear_camera_scan_process()
+
+    def _clear_camera_scan_process(self) -> None:
+        if self.camera_scan_timer is not None:
+            self.camera_scan_timer.stop()
+            self.camera_scan_timer.deleteLater()
+            self.camera_scan_timer = None
+        if self.camera_scan_process is not None:
+            self.camera_scan_process.deleteLater()
+            self.camera_scan_process = None
+        self.scan_cameras_button.setEnabled(True)
+
+    def _set_camera_scan_results(self, cameras: list[tuple[int, str, bool]]) -> None:
+        current_data = self.camera_scan_previous_data
+        self.camera_scan_previous_data = None
+        self.camera_input.clear()
         if not cameras:
             self.camera_input.addItem("No cameras found", None)
-            self._log("Camera scan completed: none")
             self._refresh_interaction_state()
             return
         for index, backend_name, read_ok in cameras:
@@ -2478,7 +2844,6 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             matched_index = self.camera_input.findData(current_data)
             if matched_index >= 0:
                 self.camera_input.setCurrentIndex(matched_index)
-        self._log("Camera scan completed")
         self._refresh_interaction_state()
 
     def _selected_camera_source(self) -> str:
@@ -2642,35 +3007,56 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
 
         config = config or self.voice_window.config()
         self._sample_voice_frame(self.latest_snapshot, force=True)
-        agent_script = Path(__file__).resolve().parents[2] / "scripts" / "pointer_voice_agent.py"
+        write_voice_control(self.voice_control_store, user_muted=self.voice_window.mute_checkbox.isChecked())
+        write_voice_status(
+            self.voice_status_store,
+            user_state="idle",
+            agent_state="initializing",
+            user_muted=self.voice_window.mute_checkbox.isChecked(),
+        )
+        clear_voice_transcript(self.voice_transcript_store)
+        self.voice_log_store.parent.mkdir(parents=True, exist_ok=True)
+        agent_script = self.repo_root / "scripts" / "pointer_voice_agent.py"
         command = [
             sys.executable,
             str(agent_script),
             "--frame-store",
             str(self.voice_frame_store),
+            "--control-store",
+            str(self.voice_control_store),
+            "--transcript-store",
+            str(self.voice_transcript_store),
+            "--status-store",
+            str(self.voice_status_store),
             "dev",
         ]
         try:
             process_env = os.environ.copy()
             process_env.update(config.process_env())
+            self.voice_log_file = self.voice_log_store.open("w", encoding="utf-8")
             self.voice_process = subprocess.Popen(
                 command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=str(Path(__file__).resolve().parents[2]),
+                stdout=self.voice_log_file,
+                stderr=subprocess.STDOUT,
+                cwd=str(self.repo_root),
                 env=process_env,
             )
         except Exception as exc:
             self.voice_process = None
+            if self.voice_log_file is not None:
+                self.voice_log_file.close()
+                self.voice_log_file = None
             self._log(f"Voice assistant failed to start: {exc}")
             self._show_error_toast("Voice assistant failed to start.")
             self._refresh_interaction_state()
             return
 
         self.voice_window.set_running(True)
+        self._refresh_voice_ui()
         self._log(
-            f"Voice assistant started: stt={config.stt_model} llm={config.llm_model} "
-            f"tts={config.tts_model}/{config.tts_voice}"
+            f"Voice assistant started: pipeline stt={config.stt_model} llm={config.llm_model} "
+            f"tts={config.tts_model}/{config.tts_voice} vad={config.vad_activation_threshold:.2f}/"
+            f"{config.vad_silence_duration_ms}ms"
         )
         self._refresh_interaction_state()
 
@@ -2685,7 +3071,12 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
                 self.voice_process.kill()
                 self.voice_process.wait(timeout=3)
         self.voice_process = None
+        if self.voice_log_file is not None:
+            self.voice_log_file.close()
+            self.voice_log_file = None
         self.voice_window.set_running(False)
+        write_voice_control(self.voice_control_store, user_muted=False)
+        write_voice_status(self.voice_status_store, user_state="idle", agent_state="idle", user_muted=False)
         if log_event:
             self._log("Voice assistant stopped")
             self._refresh_interaction_state()
@@ -2696,9 +3087,29 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
         if self.voice_process.poll() is None:
             return True
         self._log(f"Voice assistant exited with code {self.voice_process.returncode}")
+        self._log(f"Voice worker log: {self.voice_log_store}")
         self.voice_process = None
+        if self.voice_log_file is not None:
+            self.voice_log_file.close()
+            self.voice_log_file = None
         self.voice_window.set_running(False)
         return False
+
+    def _set_voice_user_muted(self, muted: bool) -> None:
+        write_voice_control(self.voice_control_store, user_muted=muted)
+        self._log("Voice user microphone muted" if muted else "Voice user microphone unmuted")
+        self._refresh_voice_ui()
+
+    def _refresh_voice_ui(self) -> None:
+        if self.voice_process is not None:
+            self._voice_assistant_running()
+        status = load_voice_status(self.voice_status_store)
+        self.voice_window.set_runtime_state(
+            user_state=str(status.get("user_state", "idle")),
+            agent_state=str(status.get("agent_state", "idle")),
+            user_muted=bool(status.get("user_muted", False)),
+        )
+        self.voice_window.set_transcript_lines(load_voice_transcript_lines(self.voice_transcript_store, limit=80))
 
     def _select_target(self, point_x: int, point_y: int) -> None:
         if self.runtime.select_target_at(point_x, point_y):
@@ -2757,6 +3168,7 @@ class PointerDesktopWindow(QtWidgets.QMainWindow):
             snapshot = self.runtime.process_next_frame()
         except Exception as exc:
             self.refresh_timer.stop()
+            self.runtime.close_camera()
             self._log(f"Runtime stopped: {exc}")
             self._show_error_toast("Runtime stopped. Check camera or serial connection.")
             self._refresh_interaction_state()
@@ -2899,7 +3311,8 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="PySide6 desktop console for TargetPointer.")
     parser.add_argument("--model", default="yolov8n.pt", help="YOLO model path or model name.")
-    parser.add_argument("--port", help="Serial port to auto-connect, for example COM4.")
+    parser.add_argument("--port", help="Serial port to select on startup, for example COM4.")
+    parser.add_argument("--auto-connect", action="store_true", help="Connect the selected serial port at startup.")
     parser.add_argument("--camera", help="Camera source to auto-open, for example 2.")
     parser.add_argument(
         "--camera-backend",
@@ -2915,7 +3328,12 @@ def main() -> int:
     app.setStyle("Fusion")
     app.setWindowIcon(build_arrow_icon(WINDOW_ICON_TEXT))
     runtime = build_runtime_from_args(args)
-    window = PointerDesktopWindow(runtime, initial_camera=args.camera, initial_port=args.port)
+    window = PointerDesktopWindow(
+        runtime,
+        initial_camera=args.camera,
+        initial_port=args.port,
+        auto_connect_serial=args.auto_connect or args.port is not None,
+    )
     window.show()
     return app.exec()
 

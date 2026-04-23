@@ -20,6 +20,10 @@ def build_command(args: argparse.Namespace) -> str:
         return "STATUS?"
     if args.command == "angle":
         return f"ANGLE:{args.angle}"
+    if args.command == "state":
+        return f"STATE:{args.mode.upper()}"
+    if args.command == "buzzer":
+        return f"BUZZER:{args.action.upper()}"
     raise ValueError(f"Unsupported command: {args.command}")
 
 
@@ -42,6 +46,10 @@ def build_expected_responses(args: argparse.Namespace) -> list[str]:
         expected.append("STATUS:")
     elif args.command == "angle":
         expected.append(f"OK:ANGLE:{args.angle}")
+    elif args.command == "state":
+        expected.append(f"OK:STATE:{args.mode.upper()}")
+    elif args.command == "buzzer":
+        expected.append(f"OK:BUZZER:{args.action.upper()}")
     return expected
 
 
@@ -112,7 +120,7 @@ def send_with_recovery(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Manual serial controller for the TargetPointer firmware.")
-    parser.add_argument("--port", required=True, help="Serial port, for example COM5 or /dev/ttyUSB0.")
+    parser.add_argument("--port", default="COM4", help="Serial port. Default: COM4.")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate.")
     parser.add_argument("--timeout", type=float, default=0.05, help="Per-read timeout in seconds.")
     parser.add_argument("--response-timeout", type=float, default=0.6, help="Total wait time for command responses.")
@@ -141,6 +149,12 @@ def main() -> int:
 
     angle_parser = subparsers.add_parser("angle")
     angle_parser.add_argument("angle", type=int, help="Servo angle in degrees.")
+
+    state_parser = subparsers.add_parser("state")
+    state_parser.add_argument("mode", choices=("idle", "search", "lock", "lost"), help="Device display state.")
+
+    buzzer_parser = subparsers.add_parser("buzzer")
+    buzzer_parser.add_argument("action", choices=("on", "off", "beep"), help="Manual buzzer test action.")
 
     args = parser.parse_args()
     primary_command = build_command(args)

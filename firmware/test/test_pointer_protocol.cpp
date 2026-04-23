@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstring>
 
 #include "pointer_protocol.hpp"
 
@@ -42,6 +43,34 @@ void test_led_commands() {
     assert(parse_command_line("LED:OFF").type == CommandType::LedOff);
 }
 
+void test_state_commands() {
+    Command command = parse_command_line("STATE:IDLE");
+    assert(command.type == CommandType::State);
+    assert(command.mode == DeviceMode::Idle);
+
+    command = parse_command_line("STATE:SEARCH");
+    assert(command.type == CommandType::State);
+    assert(command.mode == DeviceMode::Search);
+
+    command = parse_command_line("STATE:LOCK");
+    assert(command.type == CommandType::State);
+    assert(command.mode == DeviceMode::Lock);
+
+    command = parse_command_line("STATE:LOST");
+    assert(command.type == CommandType::State);
+    assert(command.mode == DeviceMode::Lost);
+
+    assert(parse_command_line("STATE:TRACKING").type == CommandType::Invalid);
+    assert(std::strcmp(device_mode_name(DeviceMode::Lock), "LOCK") == 0);
+}
+
+void test_buzzer_commands() {
+    assert(parse_command_line("BUZZER:ON").type == CommandType::BuzzerOn);
+    assert(parse_command_line("BUZZER:OFF").type == CommandType::BuzzerOff);
+    assert(parse_command_line("BUZZER:BEEP").type == CommandType::BuzzerBeep);
+    assert(parse_command_line("BUZZER:LOUD").type == CommandType::Invalid);
+}
+
 void test_unknown_command_is_invalid() {
     const Command command = parse_command_line("TRACK:person");
     assert(command.type == CommandType::Invalid);
@@ -65,6 +94,8 @@ int main() {
     test_status_query();
     test_status_query_without_question_mark();
     test_led_commands();
+    test_state_commands();
+    test_buzzer_commands();
     test_unknown_command_is_invalid();
     test_safe_angle_range();
     return 0;

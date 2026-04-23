@@ -168,6 +168,26 @@ class PointerDesktopAppTests(unittest.TestCase):
         self.assertIn('"voice": self.voice_window', source)
         self.assertIn('"report": self.report_window', source)
         self.assertIn('"insights": self.insights_window', source)
+        self.assertIn("class PolishedComboBox", source)
+        self.assertIn("configure_combo_box(self.camera_input", source)
+        self.assertIn("QListView#ComboPopupList::item:selected", source)
+
+    def test_camera_scan_runs_in_isolated_process(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "targetpointer" / "ui" / "desktop_app.py").read_text()
+
+        self.assertIn("QtCore.QProcess", source)
+        self.assertIn("targetpointer.runtime.camera_scan", source)
+        self.assertIn("process.setWorkingDirectory(str(self.repo_root))", source)
+        self.assertIn('environment.insert("PYTHONPATH"', source)
+        self.assertIn("Camera scan timed out", source)
+
+    def test_desktop_separates_default_port_display_from_auto_connect(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "targetpointer" / "ui" / "desktop_app.py").read_text()
+
+        self.assertIn("self.initial_port = initial_port or \"COM4\"", source)
+        self.assertIn("self.auto_connect_serial = auto_connect_serial", source)
+        self.assertIn("if self.auto_connect_serial and self.initial_port:", source)
+        self.assertIn("auto_connect_serial=args.auto_connect or args.port is not None", source)
 
 
 if __name__ == "__main__":

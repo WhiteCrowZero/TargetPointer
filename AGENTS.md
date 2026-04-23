@@ -32,7 +32,7 @@ The repository uses `PlatformIO` for firmware and `uv` for Python environment ma
 - `uv run pio run --project-dir firmware` builds the firmware.
 - `uv run pio run --project-dir firmware -t upload` flashes the board.
 - `uv run pio test --project-dir firmware -e native` runs host-side protocol tests.
-- `uv run python scripts/pointer_serial_cli.py --port COM5 ping` verifies the serial command path.
+- `uv run python scripts/pointer_serial_cli.py --port COM4 ping` verifies the serial command path.
 
 If you introduce a different toolchain, document the exact Windows command and required board package in `docs/` and expose it through `scripts/`. If a command is only known to work in WSL, label it explicitly as mirror-only or secondary.
 

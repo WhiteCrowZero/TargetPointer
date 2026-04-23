@@ -1,11 +1,11 @@
 [project]
 name = "targetpointer"
-version = "0.4.0"
+version = "0.6.0"
 description = "Fixed-camera person pointing demo with YOLO, serial control, Blue Pill, and SG90"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "livekit-agents[elevenlabs,openai]~=1.4",
+    "livekit-agents[elevenlabs,openai,silero]~=1.4",
     "openai>=2.0.0",
     "opencv-python>=4.13.0.92",
     "platformio>=6.1.19",
@@ -14,5 +14,4 @@ dependencies = [
     "pyserial>=3.5",
     "reportlab>=4.4.5",
     "ultralytics>=8.4.37",
-    "elevenlabs>=2.44.0",
 ]

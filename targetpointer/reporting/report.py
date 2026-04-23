@@ -152,32 +152,32 @@ def target_report_schema() -> dict[str, Any]:
 
 def build_report_prompt(status: ReportStatus) -> str:
     return (
-        "You are TargetPointer's visual intelligence module. Produce a concise, cinematic, tactical-style JSON report "
-        "about the currently selected person in a fixed-camera demo. Keep the tone cool and high-signal, but never invent "
-        "facts for style.\n\n"
-        "Strict evidence rules:\n"
-        "- Use only visible evidence from the selected target crop, the full scene image, and the system status below.\n"
-        "- The first image is the selected target crop and has priority for person details.\n"
-        "- The second image is full-scene context and is only for surroundings, relative location, and activity context.\n"
-        "- If a detail is not clearly visible, say that it is unclear instead of guessing.\n"
-        "- Do not identify the person or compare them to a known person.\n"
-        "- Do not infer race, ethnicity, nationality, religion, health, wealth, occupation, or other sensitive traits.\n"
-        "- If mentioning age or gender, phrase it as a cautious visual estimate only.\n"
-        "- Do not describe hidden body features or anything outside the images.\n"
-        "- visible_features must be short bullet-like strings grounded in visible clothing, posture, carried objects, "
-        "or clearly visible appearance details.\n"
-        "- confidence must explain which visual factors increase or reduce certainty.\n"
-        "- cautions must list uncertainty, safety, privacy, and image-quality limitations.\n\n"
-        "Return only the JSON object matching the schema. No markdown, no prose outside JSON.\n\n"
-        f"Timestamp: {status.timestamp.isoformat(timespec='seconds')}\n"
-        f"Tracking state: {status.tracking_state}\n"
-        f"Bounding box: {status.bbox}\n"
-        f"Target angle: {status.target_angle}\n"
-        f"Servo output angle: {status.output_angle}\n"
-        f"Missed frames: {status.missed_frames}\n"
-        f"Visible detections: {status.detection_count}\n"
-        f"Camera: {status.camera_source or 'unknown'} ({status.camera_backend or 'unknown'})\n"
-        f"Serial: {'connected to ' + status.serial_port if status.serial_connected and status.serial_port else 'not connected'}"
+        "你是 TargetPointer 的视觉报告模块。请根据固定摄像头画面，为当前选中的人物生成一份中文 JSON 报告。"
+        "报告要比简短摘要更完整，尽可能覆盖背景环境、人物穿着、颜色、姿态、朝向、相对位置、可见随身物品、"
+        "正在发生的动作、画面质量和系统跟踪状态；但必须严格基于可见证据，不能为了完整而猜测。\n\n"
+        "证据规则：\n"
+        "- 只使用目标裁剪图、全景图和下面的系统状态。\n"
+        "- 第一张图是选中目标裁剪图，人物细节以它为准。\n"
+        "- 第二张图是全景上下文，只用于环境、相对位置、活动背景和遮挡关系。\n"
+        "- 看不清的内容必须明确写“无法确认”或“不清楚”，不要推断。\n"
+        "- 不要识别身份，不要和名人或已知人物比较。\n"
+        "- 不要推断民族、国籍、宗教、健康、财富、职业等敏感属性。\n"
+        "- 如需提到年龄或性别，只能写成谨慎的视觉估计；不确定时不要写。\n"
+        "- 不要描述图像外、遮挡内或不可见的身体特征。\n"
+        "- visible_features 应包含多条短句，优先写清楚衣物、颜色、姿态、可见物品、遮挡和明显外观细节。\n"
+        "- environment_and_activity 要写出背景环境、人物所处位置、周围物体、光照/画面条件和可能动作。\n"
+        "- confidence 要说明哪些可见因素提高或降低可信度。\n"
+        "- cautions 要列出不确定性、安全、隐私和图像质量限制。\n\n"
+        "只返回符合 schema 的 JSON 对象，不要 Markdown，不要 JSON 之外的说明。所有字段都必须使用中文。\n\n"
+        f"时间：{status.timestamp.isoformat(timespec='seconds')}\n"
+        f"跟踪状态：{status.tracking_state}\n"
+        f"目标框：{status.bbox}\n"
+        f"目标角：{status.target_angle}\n"
+        f"舵机输出角：{status.output_angle}\n"
+        f"丢失帧数：{status.missed_frames}\n"
+        f"当前人物检测数：{status.detection_count}\n"
+        f"摄像头：{status.camera_source or 'unknown'} ({status.camera_backend or 'unknown'})\n"
+        f"串口：{'已连接 ' + status.serial_port if status.serial_connected and status.serial_port else '未连接'}"
     )
 
 
@@ -201,7 +201,7 @@ def request_target_report_analysis(
                 "content": [
                     {"type": "input_text", "text": build_report_prompt(status)},
                     {"type": "input_image", "image_url": images.target_crop_data_url, "detail": "high"},
-                    {"type": "input_image", "image_url": images.full_frame_data_url, "detail": "low"},
+                    {"type": "input_image", "image_url": images.full_frame_data_url, "detail": "high"},
                 ],
             }
         ],
@@ -262,14 +262,19 @@ def generate_target_report_pdf(
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    chinese_font = "STSong-Light"
     styles = getSampleStyleSheet()
-    body_style = ParagraphStyle("TargetPointerBody", parent=styles["BodyText"], fontName="Helvetica", fontSize=9.5, leading=13)
-    heading_style = ParagraphStyle("TargetPointerHeading", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=13)
+    title_style = ParagraphStyle("TargetPointerTitle", parent=styles["Title"], fontName=chinese_font, fontSize=17, leading=22)
+    body_style = ParagraphStyle("TargetPointerBody", parent=styles["BodyText"], fontName=chinese_font, fontSize=9.5, leading=14)
+    heading_style = ParagraphStyle("TargetPointerHeading", parent=styles["Heading2"], fontName=chinese_font, fontSize=13, leading=17)
 
     with tempfile.TemporaryDirectory(prefix="targetpointer_report_") as tmp_dir:
         tmp = Path(tmp_dir)
@@ -288,7 +293,7 @@ def generate_target_report_pdf(
             pageCompression=0,
         )
         story: list[Any] = [
-            Paragraph("TargetPointer Selected Person Report", styles["Title"]),
+            Paragraph("TargetPointer 选中人物报告", title_style),
             Paragraph(status.timestamp.strftime("%Y-%m-%d %H:%M:%S"), body_style),
             Spacer(1, 5 * mm),
             Table(
@@ -304,13 +309,13 @@ def generate_target_report_pdf(
         ]
 
         sections = [
-            ("Overall Description", _escape_paragraph_text(analysis.overall_description)),
-            ("Visible Features", _bullet_text(analysis.visible_features)),
-            ("Position and Pose", _escape_paragraph_text(analysis.position_and_pose)),
-            ("Environment and Current Activity", _escape_paragraph_text(analysis.environment_and_activity)),
-            ("Confidence", _escape_paragraph_text(analysis.confidence)),
-            ("Cautions", _bullet_text(analysis.cautions)),
-            ("System Status", _status_text(status)),
+            ("总体描述", _escape_paragraph_text(analysis.overall_description)),
+            ("可见特征", _bullet_text(analysis.visible_features)),
+            ("位置与姿态", _escape_paragraph_text(analysis.position_and_pose)),
+            ("背景环境与当前活动", _escape_paragraph_text(analysis.environment_and_activity)),
+            ("可信度说明", _escape_paragraph_text(analysis.confidence)),
+            ("注意事项", _bullet_text(analysis.cautions)),
+            ("系统状态", _status_text(status)),
         ]
         for title, text in sections:
             story.append(Paragraph(title, heading_style))
@@ -324,22 +329,22 @@ def generate_target_report_pdf(
 
 def _bullet_text(items: list[str]) -> str:
     if not items:
-        return "None reported."
+        return "未报告。"
     return "<br/>".join(f"- {_escape_paragraph_text(item)}" for item in items)
 
 
 def _status_text(status: ReportStatus) -> str:
-    camera_source = _escape_paragraph_text(status.camera_source or "unknown")
-    camera_backend = _escape_paragraph_text(status.camera_backend or "unknown")
-    serial = _escape_paragraph_text(status.serial_port if status.serial_connected and status.serial_port else "not connected")
+    camera_source = _escape_paragraph_text(status.camera_source or "未知")
+    camera_backend = _escape_paragraph_text(status.camera_backend or "未知")
+    serial = _escape_paragraph_text(status.serial_port if status.serial_connected and status.serial_port else "未连接")
     return (
-        f"Tracking: {_escape_paragraph_text(status.tracking_state)}<br/>"
-        f"BBox: {status.bbox}<br/>"
-        f"Target angle: {status.target_angle if status.target_angle is not None else 'unknown'}<br/>"
-        f"Servo output: {status.output_angle if status.output_angle is not None else 'unknown'}<br/>"
-        f"Missed frames: {status.missed_frames}; detections: {status.detection_count}<br/>"
-        f"Camera: {camera_source} / {camera_backend}<br/>"
-        f"Serial: {serial}"
+        f"跟踪状态：{_escape_paragraph_text(status.tracking_state)}<br/>"
+        f"目标框：{status.bbox}<br/>"
+        f"目标角：{status.target_angle if status.target_angle is not None else '未知'}<br/>"
+        f"舵机输出：{status.output_angle if status.output_angle is not None else '未知'}<br/>"
+        f"丢失帧数：{status.missed_frames}；检测数：{status.detection_count}<br/>"
+        f"摄像头：{camera_source} / {camera_backend}<br/>"
+        f"串口：{serial}"
     )
 
 
@@ -353,7 +358,11 @@ def _draw_footer(canvas, doc) -> None:
 
     del doc
     canvas.saveState()
-    canvas.setFont("Helvetica", 8)
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    canvas.setFont("STSong-Light", 8)
     canvas.setFillColor(colors.HexColor("#6f6f78"))
-    canvas.drawString(16 * mm, 9 * mm, "Generated by TargetPointer. Visible information only; not an identity report.")
+    canvas.drawString(16 * mm, 9 * mm, "由 TargetPointer 生成。仅描述可见信息，不作为身份识别报告。")
     canvas.restoreState()

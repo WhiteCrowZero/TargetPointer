@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from pointer_serial import PointerSerialError
-from pointer_serial_cli import send_with_fallback, send_with_recovery
+from pointer_serial_cli import build_command, build_expected_responses, send_with_fallback, send_with_recovery
 
 
 class FakeClient:
@@ -37,6 +37,18 @@ class FakeClient:
 
 
 class PointerSerialCliTests(unittest.TestCase):
+    def test_build_state_command(self) -> None:
+        args = type("Args", (), {"command": "state", "mode": "lock", "expect": []})()
+
+        self.assertEqual(build_command(args), "STATE:LOCK")
+        self.assertEqual(build_expected_responses(args), ["OK:STATE:LOCK"])
+
+    def test_build_buzzer_command(self) -> None:
+        args = type("Args", (), {"command": "buzzer", "action": "beep", "expect": []})()
+
+        self.assertEqual(build_command(args), "BUZZER:BEEP")
+        self.assertEqual(build_expected_responses(args), ["OK:BUZZER:BEEP"])
+
     def test_send_with_fallback_retries_status_without_question_mark(self) -> None:
         client = FakeClient(
             {

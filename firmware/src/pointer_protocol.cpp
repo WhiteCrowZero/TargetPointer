@@ -46,6 +46,26 @@ bool parse_integer(const char* text, std::int16_t& out_value) {
     return true;
 }
 
+bool parse_device_mode(const char* text, DeviceMode& out_mode) {
+    if (std::strcmp(text, "IDLE") == 0) {
+        out_mode = DeviceMode::Idle;
+        return true;
+    }
+    if (std::strcmp(text, "SEARCH") == 0) {
+        out_mode = DeviceMode::Search;
+        return true;
+    }
+    if (std::strcmp(text, "LOCK") == 0) {
+        out_mode = DeviceMode::Lock;
+        return true;
+    }
+    if (std::strcmp(text, "LOST") == 0) {
+        out_mode = DeviceMode::Lost;
+        return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 Command parse_command_line(const char* line) {
@@ -110,7 +130,47 @@ Command parse_command_line(const char* line) {
         }
     }
 
+    if (prefix_length == 5 && std::strncmp(trimmed, "STATE", 5) == 0) {
+        DeviceMode mode = DeviceMode::Idle;
+        if (!parse_device_mode(payload, mode)) {
+            return command;
+        }
+        command.type = CommandType::State;
+        command.mode = mode;
+        return command;
+    }
+
+    if (prefix_length == 6 && std::strncmp(trimmed, "BUZZER", 6) == 0) {
+        if (std::strcmp(payload, "ON") == 0) {
+            command.type = CommandType::BuzzerOn;
+            return command;
+        }
+        if (std::strcmp(payload, "OFF") == 0) {
+            command.type = CommandType::BuzzerOff;
+            return command;
+        }
+        if (std::strcmp(payload, "BEEP") == 0) {
+            command.type = CommandType::BuzzerBeep;
+            return command;
+        }
+    }
+
     return command;
+}
+
+const char* device_mode_name(DeviceMode mode) {
+    switch (mode) {
+        case DeviceMode::Idle:
+            return "IDLE";
+        case DeviceMode::Search:
+            return "SEARCH";
+        case DeviceMode::Lock:
+            return "LOCK";
+        case DeviceMode::Lost:
+            return "LOST";
+        default:
+            return "IDLE";
+    }
 }
 
 bool is_angle_in_safe_range(std::int16_t angle_deg, std::int16_t min_deg, std::int16_t max_deg) {

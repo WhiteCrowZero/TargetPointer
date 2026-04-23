@@ -106,7 +106,10 @@ def build_camera_candidates(camera_source, backend_name: str) -> list[tuple[obje
 
 
 def capture_reads_frame(capture) -> bool:
-    ok, _frame = capture.read()
+    try:
+        ok, _frame = capture.read()
+    except Exception:
+        return False
     return bool(ok)
 
 
@@ -134,14 +137,14 @@ def open_camera_capture(camera_source, backend_name: str):
     )
 
 
-def list_available_cameras(max_index: int, backend_name: str) -> list[tuple[int, str, bool]]:
+def list_available_cameras(max_index: int, backend_name: str, *, probe_frames: bool = False) -> list[tuple[int, str, bool]]:
     results: list[tuple[int, str, bool]] = []
     for camera_index in range(max_index + 1):
         capture, selected_backend, _errors = try_open_camera_source(camera_index, backend_name)
         if capture is None or selected_backend is None:
             continue
 
-        read_ok = capture_reads_frame(capture)
+        read_ok = True if not probe_frames else capture_reads_frame(capture)
         capture.release()
         results.append((camera_index, selected_backend, read_ok))
 
@@ -279,6 +282,50 @@ def send_control_command(
     )
 
 
+def desired_device_mode(
+    tracking_state: str,
+    tracked_bbox: BBox | None,
+    center_pending_final_state: str = STATE_SELECTING,
+) -> str:
+    if tracking_state == STATE_LOST:
+        return "LOST"
+    if tracking_state == STATE_CENTERING and center_pending_final_state == STATE_LOST:
+        return "LOST"
+    if tracking_state in (STATE_LOCKED, STATE_REACQUIRING) and tracked_bbox is not None:
+        return "LOCK"
+    return "SEARCH"
+
+
+def sync_device_state(
+    serial_client: PointerSerialClient,
+    *,
+    mode: str,
+    active_mode: str | None,
+    state_supported: bool,
+    response_timeout: float,
+    idle_timeout: float,
+) -> tuple[list[str], str | None, bool]:
+    if mode == active_mode:
+        return [], active_mode, state_supported
+
+    if not state_supported:
+        return [], active_mode, state_supported
+
+    try:
+        responses = send_control_command(
+            serial_client,
+            f"STATE:{mode}",
+            response_timeout=response_timeout,
+            idle_timeout=idle_timeout,
+            require_response=True,
+        )
+        return responses, mode, state_supported
+    except PointerSerialError as exc:
+        if "ERR:BAD_CMD" in str(exc):
+            state_supported = False
+        return [], None, state_supported
+
+
 def parse_status_fields(responses: list[str]) -> dict[str, str]:
     for line in reversed(responses):
         if not line.startswith("STATUS:"):
@@ -360,7 +407,7 @@ def safe_shutdown_serial(
     try:
         send_control_command(
             serial_client,
-            "LED:OFF",
+            "STATE:IDLE",
             response_timeout=response_timeout,
             idle_timeout=idle_timeout,
             require_response=False,
@@ -434,6 +481,7 @@ def compute_target_servo_angle(
         args.center_angle,
         args.max_angle,
     )
+    raw_angle = max(args.min_angle, min(args.max_angle, args.center_angle * 2 - raw_angle))
     deadzoned_angle = apply_deadzone(raw_angle, args.center_angle, args.center_deadzone)
     return hold_angle_if_within_threshold(current_output_angle, deadzoned_angle, args.angle_hold_threshold)
 
@@ -486,7 +534,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Host app for fixed-camera person pointing with detection-driven target maintenance."
     )
-    parser.add_argument("--port", help="Serial port, for example COM5.")
+    parser.add_argument("--port", default="COM4", help="Serial port. Default: COM4.")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate.")
     parser.add_argument("--camera", default="0", help="Camera index or URL. Default: 0.")
     parser.add_argument(
@@ -497,6 +545,11 @@ def main() -> int:
     )
     parser.add_argument("--list-cameras", action="store_true", help="Probe Windows camera indices and exit.")
     parser.add_argument("--camera-scan-max-index", type=int, default=4, help="Highest camera index to probe with --list-cameras.")
+    parser.add_argument(
+        "--camera-scan-read",
+        action="store_true",
+        help="Read one frame from each opened camera during --list-cameras. Disabled by default to avoid MSMF stalls.",
+    )
     parser.add_argument("--model", default="yolov8n.pt", help="YOLO model path or model name.")
     parser.add_argument("--tracking-mode", choices=("detection",), default="detection", help="Detection-driven tracking mode.")
     parser.add_argument("--yolo-confidence", type=float, default=0.35, help="Minimum confidence for YOLO person detections.")
@@ -544,7 +597,11 @@ def main() -> int:
         parser.error("--angle-hold-threshold must be non-negative")
 
     if args.list_cameras:
-        camera_results = list_available_cameras(args.camera_scan_max_index, args.camera_backend)
+        camera_results = list_available_cameras(
+            args.camera_scan_max_index,
+            args.camera_backend,
+            probe_frames=args.camera_scan_read,
+        )
         if not camera_results:
             print(
                 f"No camera sources opened successfully in range 0..{args.camera_scan_max_index}. "
@@ -600,6 +657,8 @@ def main() -> int:
     target_angle: int | None = None
     center_pending = False
     center_pending_final_state = STATE_SELECTING
+    device_mode_active: str | None = None
+    device_state_supported = True
 
     try:
         if args.verbose:
@@ -619,6 +678,14 @@ def main() -> int:
             status_fields,
             current_output_angle=None,
             current_target_angle=None,
+        )
+        _responses, device_mode_active, device_state_supported = sync_device_state(
+            serial_client,
+            mode="SEARCH",
+            active_mode=device_mode_active,
+            state_supported=device_state_supported,
+            response_timeout=args.serial_response_timeout,
+            idle_timeout=args.serial_idle_timeout,
         )
 
         while True:
@@ -772,6 +839,15 @@ def main() -> int:
                 state.tracking_state = STATE_SELECTING
                 if state.pending_selection is None:
                     target_angle = None
+
+            _responses, device_mode_active, device_state_supported = sync_device_state(
+                serial_client,
+                mode=desired_device_mode(state.tracking_state, tracked_bbox, center_pending_final_state),
+                active_mode=device_mode_active,
+                state_supported=device_state_supported,
+                response_timeout=args.serial_response_timeout,
+                idle_timeout=args.serial_idle_timeout,
+            )
 
             draw_overlay(
                 frame,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -20,12 +22,20 @@ except ImportError as exc:
 
 
 DEFAULT_FRAME_STORE = Path("runtime/voice/latest_frame.json")
-DEFAULT_VOICE_LLM_MODEL = "gpt-5.4-mini"
-DEFAULT_STT_MODEL = "scribe_v2_realtime"
-DEFAULT_STT_LANGUAGE = "en"
-DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
-DEFAULT_TTS_VOICE = "alloy"
+DEFAULT_CONTROL_STORE = Path("runtime/voice/control.json")
+DEFAULT_TRANSCRIPT_STORE = Path("runtime/voice/transcript.jsonl")
+DEFAULT_STATUS_STORE = Path("runtime/voice/status.json")
+DEFAULT_VOICE_LLM_MODEL = "gpt-4o-mini"
+DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe"
+DEFAULT_STT_LANGUAGE = "zh"
+DEFAULT_TTS_MODEL = "eleven_turbo_v2_5"
+DEFAULT_TTS_VOICE = "l7kNoIfnJKPg7779LI2t"
 DEFAULT_TTS_SPEED = 1.0
+DEFAULT_ELEVEN_STABILITY = 0.50
+DEFAULT_ELEVEN_SIMILARITY_BOOST = 0.75
+DEFAULT_VAD_ACTIVATION_THRESHOLD = 0.75
+DEFAULT_VAD_PREFIX_PADDING_MS = 300
+DEFAULT_VAD_SILENCE_DURATION_MS = 450
 
 VOICE_REQUIRED_ENV_VARS = ("OPENAI_API_KEY", "ELEVEN_API_KEY", "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
 
@@ -40,6 +50,11 @@ class VoiceAssistantConfig:
     tts_model: str = DEFAULT_TTS_MODEL
     tts_voice: str = DEFAULT_TTS_VOICE
     tts_speed: float = DEFAULT_TTS_SPEED
+    eleven_stability: float = DEFAULT_ELEVEN_STABILITY
+    eleven_similarity_boost: float = DEFAULT_ELEVEN_SIMILARITY_BOOST
+    vad_activation_threshold: float = DEFAULT_VAD_ACTIVATION_THRESHOLD
+    vad_prefix_padding_ms: int = DEFAULT_VAD_PREFIX_PADDING_MS
+    vad_silence_duration_ms: int = DEFAULT_VAD_SILENCE_DURATION_MS
 
     def process_env(self) -> dict[str, str]:
         env: dict[str, str] = {
@@ -49,6 +64,11 @@ class VoiceAssistantConfig:
             "TARGETPOINTER_TTS_MODEL": self.tts_model,
             "TARGETPOINTER_TTS_VOICE": self.tts_voice,
             "TARGETPOINTER_TTS_SPEED": f"{self.tts_speed:.3f}",
+            "TARGETPOINTER_ELEVEN_STABILITY": f"{self.eleven_stability:.3f}",
+            "TARGETPOINTER_ELEVEN_SIMILARITY_BOOST": f"{self.eleven_similarity_boost:.3f}",
+            "TARGETPOINTER_VAD_ACTIVATION_THRESHOLD": f"{self.vad_activation_threshold:.3f}",
+            "TARGETPOINTER_VAD_PREFIX_PADDING_MS": str(self.vad_prefix_padding_ms),
+            "TARGETPOINTER_VAD_SILENCE_DURATION_MS": str(self.vad_silence_duration_ms),
         }
         if self.temperature is not None:
             env["TARGETPOINTER_VOICE_TEMPERATURE"] = f"{self.temperature:.3f}"
@@ -65,6 +85,14 @@ class VoiceFrame:
     bbox: tuple[int, int, int, int] | None
     target_angle: int | None
     output_angle: int | None
+
+
+@dataclass(frozen=True)
+class VoiceTranscriptLine:
+    role: str
+    text: str
+    is_final: bool
+    timestamp: str
 
 
 def missing_voice_env_vars(environ: dict[str, str] | None = None) -> list[str]:
@@ -100,6 +128,11 @@ def env_int_default(name: str) -> int | None:
     return optional_int_env(name)
 
 
+def env_int_with_default(name: str, fallback: int) -> int:
+    value = optional_int_env(name)
+    return fallback if value is None else value
+
+
 def voice_config_defaults_from_env() -> VoiceAssistantConfig:
     return VoiceAssistantConfig(
         stt_model=env_text_default("TARGETPOINTER_STT_MODEL", DEFAULT_STT_MODEL),
@@ -110,6 +143,23 @@ def voice_config_defaults_from_env() -> VoiceAssistantConfig:
         tts_model=env_text_default("TARGETPOINTER_TTS_MODEL", DEFAULT_TTS_MODEL),
         tts_voice=env_text_default("TARGETPOINTER_TTS_VOICE", DEFAULT_TTS_VOICE),
         tts_speed=env_float_default("TARGETPOINTER_TTS_SPEED", DEFAULT_TTS_SPEED),
+        eleven_stability=env_float_default("TARGETPOINTER_ELEVEN_STABILITY", DEFAULT_ELEVEN_STABILITY),
+        eleven_similarity_boost=env_float_default(
+            "TARGETPOINTER_ELEVEN_SIMILARITY_BOOST",
+            DEFAULT_ELEVEN_SIMILARITY_BOOST,
+        ),
+        vad_activation_threshold=env_float_default(
+            "TARGETPOINTER_VAD_ACTIVATION_THRESHOLD",
+            DEFAULT_VAD_ACTIVATION_THRESHOLD,
+        ),
+        vad_prefix_padding_ms=env_int_with_default(
+            "TARGETPOINTER_VAD_PREFIX_PADDING_MS",
+            DEFAULT_VAD_PREFIX_PADDING_MS,
+        ),
+        vad_silence_duration_ms=env_int_with_default(
+            "TARGETPOINTER_VAD_SILENCE_DURATION_MS",
+            DEFAULT_VAD_SILENCE_DURATION_MS,
+        ),
     )
 
 
@@ -183,18 +233,137 @@ def load_latest_voice_frame(store_path: Path | str = DEFAULT_FRAME_STORE) -> Voi
     )
 
 
+def write_voice_control(store_path: Path | str = DEFAULT_CONTROL_STORE, *, user_muted: bool = False) -> None:
+    payload = {"user_muted": bool(user_muted), "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    _write_json_atomic(store_path, payload)
+
+
+def load_voice_control(store_path: Path | str = DEFAULT_CONTROL_STORE) -> dict[str, Any]:
+    store_path = Path(store_path)
+    if not store_path.exists():
+        return {"user_muted": False}
+    try:
+        payload = json.loads(store_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"user_muted": False}
+    return {"user_muted": bool(payload.get("user_muted", False))}
+
+
+def clear_voice_transcript(store_path: Path | str = DEFAULT_TRANSCRIPT_STORE) -> None:
+    store_path = Path(store_path)
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    store_path.write_text("", encoding="utf-8")
+
+
+def append_voice_transcript(
+    store_path: Path | str,
+    *,
+    role: str,
+    text: str,
+    is_final: bool = True,
+    timestamp: datetime | None = None,
+) -> VoiceTranscriptLine:
+    timestamp = timestamp or datetime.now(timezone.utc)
+    line = VoiceTranscriptLine(
+        role=role,
+        text=text.strip(),
+        is_final=is_final,
+        timestamp=timestamp.isoformat(timespec="seconds"),
+    )
+    if not line.text:
+        return line
+    store_path = Path(store_path)
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    with store_path.open("a", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "role": line.role,
+                "text": line.text,
+                "is_final": line.is_final,
+                "timestamp": line.timestamp,
+            },
+            handle,
+            ensure_ascii=False,
+        )
+        handle.write("\n")
+    return line
+
+
+def load_voice_transcript_lines(store_path: Path | str = DEFAULT_TRANSCRIPT_STORE, *, limit: int = 80) -> list[VoiceTranscriptLine]:
+    store_path = Path(store_path)
+    if not store_path.exists():
+        return []
+    lines: list[VoiceTranscriptLine] = []
+    for raw_line in store_path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]:
+        try:
+            payload = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        lines.append(
+            VoiceTranscriptLine(
+                role=str(payload.get("role", "system")),
+                text=str(payload.get("text", "")),
+                is_final=bool(payload.get("is_final", True)),
+                timestamp=str(payload.get("timestamp", "")),
+            )
+        )
+    return lines
+
+
+def write_voice_status(
+    store_path: Path | str = DEFAULT_STATUS_STORE,
+    *,
+    user_state: str = "listening",
+    agent_state: str = "idle",
+    user_muted: bool = False,
+) -> None:
+    _write_json_atomic(
+        store_path,
+        {
+            "user_state": user_state,
+            "agent_state": agent_state,
+            "user_muted": user_muted,
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+    )
+
+
+def load_voice_status(store_path: Path | str = DEFAULT_STATUS_STORE) -> dict[str, Any]:
+    store_path = Path(store_path)
+    if not store_path.exists():
+        return {"user_state": "idle", "agent_state": "idle", "user_muted": False}
+    try:
+        payload = json.loads(store_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"user_state": "idle", "agent_state": "idle", "user_muted": False}
+    return {
+        "user_state": str(payload.get("user_state", "idle")),
+        "agent_state": str(payload.get("agent_state", "idle")),
+        "user_muted": bool(payload.get("user_muted", False)),
+    }
+
+
+def _write_json_atomic(store_path: Path | str, payload: dict[str, Any]) -> None:
+    store_path = Path(store_path)
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=store_path.parent, delete=False) as tmp:
+        json.dump(payload, tmp, ensure_ascii=False)
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(store_path)
+
+
 def should_sample_frame(last_sample_monotonic: float | None, now_monotonic: float, interval_seconds: float = 5.0) -> bool:
     return last_sample_monotonic is None or now_monotonic - last_sample_monotonic >= interval_seconds
 
 
 def build_frame_context_text(frame: VoiceFrame) -> str:
     return (
-        "Latest TargetPointer camera frame for this user turn. "
-        f"Captured at {frame.timestamp}. "
-        f"Tracking state: {frame.tracking_state}. "
-        f"Selected target bbox: {frame.bbox if frame.bbox is not None else 'none'}. "
-        f"Target angle: {frame.target_angle if frame.target_angle is not None else 'unknown'}. "
-        f"Servo output angle: {frame.output_angle if frame.output_angle is not None else 'unknown'}."
+        "这是本轮用户提问时 TargetPointer 的最新摄像头画面。"
+        f"采集时间：{frame.timestamp}。"
+        f"跟踪状态：{frame.tracking_state}。"
+        f"选中目标框：{frame.bbox if frame.bbox is not None else '无'}。"
+        f"目标角：{frame.target_angle if frame.target_angle is not None else '未知'}。"
+        f"舵机输出角：{frame.output_angle if frame.output_angle is not None else '未知'}。"
     )
 
 
@@ -207,20 +376,75 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def run_livekit_agent(frame_store: Path | str = DEFAULT_FRAME_STORE) -> None:
+def _chat_message_text(item: Any) -> str:
+    content = getattr(item, "content", None)
+    if content is None and isinstance(item, dict):
+        content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("text"):
+                parts.append(str(part["text"]))
+            else:
+                text = getattr(part, "text", None)
+                if text:
+                    parts.append(str(text))
+        return "".join(parts).strip()
+    return ""
+
+
+async def _poll_voice_control(
+    session: Any,
+    control_store: Path | str,
+    status_store: Path | str,
+    state: dict[str, str | bool],
+) -> None:
+    last_muted: bool | None = None
+    while True:
+        control = load_voice_control(control_store)
+        muted = bool(control.get("user_muted", False))
+        if muted != last_muted:
+            if muted:
+                with contextlib.suppress(Exception):
+                    session.interrupt(force=True)
+            with contextlib.suppress(Exception):
+                session.input.set_audio_enabled(not muted)
+            last_muted = muted
+            state["user_muted"] = muted
+            write_voice_status(
+                status_store,
+                user_state=str(state.get("user_state", "listening")),
+                agent_state=str(state.get("agent_state", "idle")),
+                user_muted=muted,
+            )
+        await asyncio.sleep(0.2)
+
+
+def run_livekit_agent(
+    frame_store: Path | str = DEFAULT_FRAME_STORE,
+    *,
+    control_store: Path | str = DEFAULT_CONTROL_STORE,
+    transcript_store: Path | str = DEFAULT_TRANSCRIPT_STORE,
+    status_store: Path | str = DEFAULT_STATUS_STORE,
+) -> None:
     from livekit import agents
     from livekit.agents import Agent, AgentSession, ChatContext, ChatMessage
     from livekit.agents.llm import ImageContent
-    from livekit.plugins import elevenlabs
-    from livekit.plugins import openai
+    from livekit.plugins import elevenlabs, openai, silero
 
     class TargetPointerVoiceAgent(Agent):
         def __init__(self) -> None:
             super().__init__(
                 instructions=(
-                    "You are the TargetPointer voice assistant. Answer questions about the current fixed-camera demo. "
-                    "Use the latest injected image when present. Describe visible scene facts and tracking state. "
-                    "Do not identify people or infer sensitive traits."
+                    "你是 TargetPointer 的中文实时语音助手。你只使用当前画面和系统状态回答问题。"
+                    "描述时尽量具体，包括背景环境、人物可见穿着、姿态、相对位置、动作和设备跟踪状态；"
+                    "不确定就说不确定，不要为了显得完整而编造。"
+                    "不要识别个人身份，不要推断民族、宗教、健康、财富、职业等敏感属性。"
+                    "回答要适合语音播报，短句、中文、不要 Markdown。"
                 )
             )
 
@@ -239,6 +463,10 @@ def run_livekit_agent(frame_store: Path | str = DEFAULT_FRAME_STORE) -> None:
 
     async def entrypoint(ctx: agents.JobContext) -> None:
         await ctx.connect()
+        state: dict[str, str | bool] = {"user_state": "listening", "agent_state": "idle", "user_muted": False}
+        write_voice_status(status_store, user_state="listening", agent_state="idle", user_muted=False)
+        append_voice_transcript(transcript_store, role="system", text="实时语音 worker 已连接 LiveKit 房间。")
+
         llm_kwargs: dict[str, Any] = {
             "model": os.getenv("TARGETPOINTER_VOICE_LLM_MODEL") or DEFAULT_VOICE_LLM_MODEL,
         }
@@ -247,22 +475,98 @@ def run_livekit_agent(frame_store: Path | str = DEFAULT_FRAME_STORE) -> None:
         if temperature is not None:
             llm_kwargs["temperature"] = temperature
         if max_output_tokens is not None:
-            llm_kwargs["max_output_tokens"] = max_output_tokens
+            llm_kwargs["max_completion_tokens"] = max_output_tokens
 
         session = AgentSession(
-            stt=elevenlabs.STT(
-                model_id=os.getenv("TARGETPOINTER_STT_MODEL") or DEFAULT_STT_MODEL,
-                language_code=os.getenv("TARGETPOINTER_STT_LANGUAGE") or DEFAULT_STT_LANGUAGE,
+            vad=silero.VAD.load(
+                activation_threshold=env_float_default(
+                    "TARGETPOINTER_VAD_ACTIVATION_THRESHOLD",
+                    DEFAULT_VAD_ACTIVATION_THRESHOLD,
+                ),
+                prefix_padding_duration=env_int_with_default(
+                    "TARGETPOINTER_VAD_PREFIX_PADDING_MS",
+                    DEFAULT_VAD_PREFIX_PADDING_MS,
+                )
+                / 1000.0,
+                min_silence_duration=env_int_with_default(
+                    "TARGETPOINTER_VAD_SILENCE_DURATION_MS",
+                    DEFAULT_VAD_SILENCE_DURATION_MS,
+                )
+                / 1000.0,
+                force_cpu=True,
             ),
-            llm=openai.responses.LLM(**llm_kwargs),
-            tts=openai.TTS(
+            stt=openai.STT(
+                model=os.getenv("TARGETPOINTER_STT_MODEL") or DEFAULT_STT_MODEL,
+                language=os.getenv("TARGETPOINTER_STT_LANGUAGE") or DEFAULT_STT_LANGUAGE,
+                noise_reduction_type="near_field",
+                use_realtime=False,
+            ),
+            llm=openai.LLM(**llm_kwargs),
+            tts=elevenlabs.TTS(
                 model=os.getenv("TARGETPOINTER_TTS_MODEL") or DEFAULT_TTS_MODEL,
-                voice=os.getenv("TARGETPOINTER_TTS_VOICE") or DEFAULT_TTS_VOICE,
-                speed=optional_float_env("TARGETPOINTER_TTS_SPEED") or DEFAULT_TTS_SPEED,
+                voice_id=os.getenv("TARGETPOINTER_TTS_VOICE") or DEFAULT_TTS_VOICE,
+                voice_settings=elevenlabs.VoiceSettings(
+                    stability=env_float_default("TARGETPOINTER_ELEVEN_STABILITY", DEFAULT_ELEVEN_STABILITY),
+                    similarity_boost=env_float_default(
+                        "TARGETPOINTER_ELEVEN_SIMILARITY_BOOST",
+                        DEFAULT_ELEVEN_SIMILARITY_BOOST,
+                    ),
+                    speed=optional_float_env("TARGETPOINTER_TTS_SPEED") or DEFAULT_TTS_SPEED,
+                    use_speaker_boost=True,
+                ),
+                language=os.getenv("TARGETPOINTER_STT_LANGUAGE") or DEFAULT_STT_LANGUAGE,
+                sync_alignment=True,
+            ),
+            use_tts_aligned_transcript=True,
+            min_endpointing_delay=0.2,
+            max_endpointing_delay=2.2,
+        )
+
+        def update_status(*, user_state: str | None = None, agent_state: str | None = None) -> None:
+            if user_state is not None:
+                state["user_state"] = user_state
+            if agent_state is not None:
+                state["agent_state"] = agent_state
+            write_voice_status(
+                status_store,
+                user_state=str(state.get("user_state", "listening")),
+                agent_state=str(state.get("agent_state", "idle")),
+                user_muted=bool(state.get("user_muted", False)),
+            )
+
+        session.on("user_state_changed", lambda ev: update_status(user_state=ev.new_state))
+        session.on("agent_state_changed", lambda ev: update_status(agent_state=ev.new_state))
+        session.on(
+            "user_input_transcribed",
+            lambda ev: append_voice_transcript(
+                transcript_store,
+                role="user",
+                text=ev.transcript,
+                is_final=ev.is_final,
             ),
         )
+        def record_assistant_message(ev: Any) -> None:
+            role = str(getattr(ev.item, "role", "assistant"))
+            if role != "assistant":
+                return
+            append_voice_transcript(
+                transcript_store,
+                role=role,
+                text=_chat_message_text(ev.item),
+                is_final=True,
+            )
+
+        session.on("conversation_item_added", record_assistant_message)
+
         await session.start(room=ctx.room, agent=TargetPointerVoiceAgent())
-        await session.generate_reply(instructions="Briefly greet the operator and say you can answer questions about the current view.")
+        control_task = asyncio.create_task(_poll_voice_control(session, control_store, status_store, state))
+        await session.generate_reply(instructions="用中文和操作者打招呼，说明你可以实时回答当前画面、人物穿着和设备跟踪状态。")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            control_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await control_task
 
     agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
 
@@ -270,6 +574,9 @@ def run_livekit_agent(frame_store: Path | str = DEFAULT_FRAME_STORE) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="LiveKit voice assistant worker for TargetPointer.")
     parser.add_argument("--frame-store", default=str(DEFAULT_FRAME_STORE), help="Path to latest sampled frame JSON.")
+    parser.add_argument("--control-store", default=str(DEFAULT_CONTROL_STORE), help="Path to voice control JSON.")
+    parser.add_argument("--transcript-store", default=str(DEFAULT_TRANSCRIPT_STORE), help="Path to transcript JSONL.")
+    parser.add_argument("--status-store", default=str(DEFAULT_STATUS_STORE), help="Path to voice status JSON.")
     parser.add_argument("--check-env", action="store_true", help="Only validate required environment variables.")
     args, remaining = parser.parse_known_args()
 
@@ -288,7 +595,12 @@ def main() -> int:
     import sys
 
     sys.argv = [sys.argv[0], *remaining]
-    run_livekit_agent(args.frame_store)
+    run_livekit_agent(
+        args.frame_store,
+        control_store=args.control_store,
+        transcript_store=args.transcript_store,
+        status_store=args.status_store,
+    )
     return 0
 
 

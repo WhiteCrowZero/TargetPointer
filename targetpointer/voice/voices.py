@@ -2,11 +2,12 @@ from __future__ import annotations
 
 
 PERSON_VOICE_ID_MAP: dict[str, str] = {
+    "默认音色": "l7kNoIfnJKPg7779LI2t",
     "外国绅士": "JBFqnCBsd6RMkjVDRZzb",
     "唯美女性": "jBpfuIE2acCO8z3wKNLl",
     "粤语女性": "Xb7hH8MSUJpSbSDYk0k2",
-    "沉稳旁白（男）": "2EiwWnXFnvU5JabPnv8n",
-    "沉稳旁白（女）": "piTKgcLEGmPE4e6mEKli",
+    "旁白（男）": "2EiwWnXFnvU5JabPnv8n",
+    "旁白（女）": "piTKgcLEGmPE4e6mEKli",
 }
 
 def voice_name_for_id(voice_id: str) -> str | None:

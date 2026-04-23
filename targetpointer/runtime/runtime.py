@@ -194,16 +194,16 @@ class PointerRuntime:
         self.smoothed_target_center: tuple[float, float] | None = None
         self.last_output_angle: int | None = None
         self.last_target_angle: int | None = None
-        self.tracking_indicator_active = False
-        self.tracking_indicator_supported = True
+        self.device_mode_active: str | None = None
+        self.device_state_supported = True
         self.center_pending = False
         self.center_pending_final_state = STATE_SELECTING
         self.missed_frames = 0
         self.frame_index = 0
         self.force_detection = False
 
-    def list_cameras(self, max_index: int = 4) -> list[tuple[int, str, bool]]:
-        return list_available_cameras(max_index, self.camera_backend_preference)
+    def list_cameras(self, max_index: int = 4, *, probe_frames: bool = False) -> list[tuple[int, str, bool]]:
+        return list_available_cameras(max_index, self.camera_backend_preference, probe_frames=probe_frames)
 
     def connect_serial(self, port: str) -> list[str]:
         self.disconnect_serial()
@@ -225,7 +225,7 @@ class PointerRuntime:
         except Exception:
             self.disconnect_serial()
             raise
-        self.tracking_indicator_supported = True
+        self.device_state_supported = True
         status_fields = parse_status_fields(responses)
         self.last_output_angle, self.last_target_angle, _attached = update_angles_from_status_fields(
             status_fields,
@@ -234,7 +234,7 @@ class PointerRuntime:
         )
         self.center_pending = False
         self.center_pending_final_state = STATE_SELECTING
-        responses.extend(self._sync_tracking_indicator(force=True))
+        responses.extend(self._sync_device_state(force=True))
         return responses
 
     def disconnect_serial(self) -> None:
@@ -247,8 +247,8 @@ class PointerRuntime:
         self.serial_client.close()
         self.serial_client = None
         self.serial_port = None
-        self.tracking_indicator_supported = True
-        self.tracking_indicator_active = False
+        self.device_state_supported = True
+        self.device_mode_active = None
         self.center_pending = False
         self.center_pending_final_state = STATE_SELECTING
         self.last_output_angle = None
@@ -280,7 +280,7 @@ class PointerRuntime:
         self.state.last_match_success = False
         self.state.tracking_state = STATE_SELECTING
         self.missed_frames = 0
-        self._sync_tracking_indicator()
+        self._sync_device_state()
 
     def center_device(self) -> list[str]:
         return self._begin_centering(STATE_SELECTING)
@@ -334,7 +334,7 @@ class PointerRuntime:
         self.state.tracking_state = STATE_LOST
         self.state.last_match = None
         self.state.last_match_success = False
-        responses.extend(self._sync_tracking_indicator())
+        responses.extend(self._sync_device_state())
         return responses
 
     def _begin_centering(self, final_state: str) -> list[str]:
@@ -382,11 +382,17 @@ class PointerRuntime:
         if not self.center_pending and self.state.pending_selection is None:
             self.last_target_angle = None
 
-        responses.extend(self._sync_tracking_indicator())
+        responses.extend(self._sync_device_state())
         return responses
 
-    def _desired_tracking_indicator_state(self) -> bool:
-        return self.state.tracking_state in (STATE_LOCKED, STATE_REACQUIRING) and self.tracked_bbox is not None
+    def _desired_device_mode(self) -> str:
+        if self.state.tracking_state == STATE_LOST:
+            return "LOST"
+        if self.state.tracking_state == STATE_CENTERING and self.center_pending_final_state == STATE_LOST:
+            return "LOST"
+        if self.state.tracking_state in (STATE_LOCKED, STATE_REACQUIRING) and self.tracked_bbox is not None:
+            return "LOCK"
+        return "SEARCH"
 
     def _query_status_fields(self) -> dict[str, str]:
         if self.serial_client is None:
@@ -455,7 +461,7 @@ class PointerRuntime:
         try:
             send_control_command(
                 self.serial_client,
-                "LED:OFF",
+                "STATE:IDLE",
                 response_timeout=self.serial_response_timeout,
                 idle_timeout=self.serial_idle_timeout,
                 require_response=False,
@@ -496,29 +502,31 @@ class PointerRuntime:
         except PointerSerialError:
             pass
 
-    def _sync_tracking_indicator(self, force: bool = False) -> list[str]:
-        desired_state = self._desired_tracking_indicator_state()
-        if not force and desired_state == self.tracking_indicator_active:
+    def _sync_device_state(self, force: bool = False) -> list[str]:
+        desired_mode = self._desired_device_mode()
+        if not force and desired_mode == self.device_mode_active:
             return []
 
-        self.tracking_indicator_active = desired_state
-        if self.serial_client is None or not self.tracking_indicator_supported:
+        self.device_mode_active = desired_mode
+        if self.serial_client is None:
             return []
 
-        command = "LED:ON" if desired_state else "LED:OFF"
+        if not self.device_state_supported:
+            return []
+
         try:
-            responses = send_control_command(
+            return send_control_command(
                 self.serial_client,
-                command,
+                f"STATE:{desired_mode}",
                 response_timeout=self.serial_response_timeout,
                 idle_timeout=self.serial_idle_timeout,
                 require_response=True,
             )
-        except PointerSerialError:
-            self.tracking_indicator_supported = False
+        except PointerSerialError as exc:
+            self.device_mode_active = None
+            if "ERR:BAD_CMD" in str(exc):
+                self.device_state_supported = False
             return []
-
-        return responses
 
     def _run_detection_cycle(self, frame) -> None:
         self.state.pending_detections = detect_people(
@@ -610,7 +618,7 @@ class PointerRuntime:
             self.state.tracking_state = STATE_SELECTING
             self.last_target_angle = None
 
-        self._sync_tracking_indicator()
+        self._sync_device_state()
 
         return RuntimeSnapshot(
             frame=frame,

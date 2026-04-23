@@ -32,12 +32,12 @@ class FakeResponses:
         return SimpleNamespace(
             output_text=json.dumps(
                 {
-                    "overall_description": "A selected person is visible in the crop.",
-                    "visible_features": ["Dark top", "Standing posture"],
-                    "position_and_pose": "Near the center of the frame.",
-                    "environment_and_activity": "Indoor scene with tracking active.",
-                    "confidence": "Medium; image quality is sufficient.",
-                    "cautions": ["No identity inference was made."],
+                    "overall_description": "裁剪图中可以看到一个被选中的人物。",
+                    "visible_features": ["深色上衣", "站立姿态"],
+                    "position_and_pose": "人物位于画面中心附近。",
+                    "environment_and_activity": "室内背景中系统正在跟踪目标。",
+                    "confidence": "中等；画面质量足够但仍有细节限制。",
+                    "cautions": ["未进行身份识别。"],
                 }
             )
         )
@@ -78,7 +78,7 @@ class PointerReportTests(unittest.TestCase):
 
         analysis = request_target_report_analysis(images, self._status(), client=client, model="test-model")
 
-        self.assertEqual(analysis.overall_description, "A selected person is visible in the crop.")
+        self.assertEqual(analysis.overall_description, "裁剪图中可以看到一个被选中的人物。")
         self.assertEqual(responses.last_kwargs["model"], "test-model")
         content = responses.last_kwargs["input"][0]["content"]
         self.assertEqual(content[1]["type"], "input_image")
@@ -88,9 +88,9 @@ class PointerReportTests(unittest.TestCase):
     def test_build_report_prompt_requires_strict_visual_evidence(self) -> None:
         prompt = build_report_prompt(self._status())
 
-        self.assertIn("Use only visible evidence", prompt)
-        self.assertIn("Return only the JSON object", prompt)
-        self.assertIn("tactical-style JSON report", prompt)
+        self.assertIn("只使用目标裁剪图", prompt)
+        self.assertIn("只返回符合 schema 的 JSON 对象", prompt)
+        self.assertIn("所有字段都必须使用中文", prompt)
 
     def test_parse_target_report_analysis_rejects_missing_text(self) -> None:
         with self.assertRaises(ValueError):
@@ -100,12 +100,12 @@ class PointerReportTests(unittest.TestCase):
         frame = np.zeros((120, 180, 3), dtype=np.uint8)
         images = build_report_images(frame, (20, 10, 50, 80))
         analysis = TargetReportAnalysis(
-            overall_description="A selected person is visible in the crop.",
-            visible_features=["Dark top", "Standing posture"],
-            position_and_pose="Near the center of the frame.",
-            environment_and_activity="Indoor scene with tracking active.",
-            confidence="Medium; image quality is sufficient.",
-            cautions=["No identity inference was made."],
+            overall_description="裁剪图中可以看到一个被选中的人物。",
+            visible_features=["深色上衣", "站立姿态"],
+            position_and_pose="人物位于画面中心附近。",
+            environment_and_activity="室内背景中系统正在跟踪目标。",
+            confidence="中等；画面质量足够但仍有细节限制。",
+            cautions=["未进行身份识别。"],
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:

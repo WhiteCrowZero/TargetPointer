@@ -7,9 +7,10 @@
 ## 当前状态
 
 - 软件主链路已经打通：YOLO 人物检测初始化、单目标维护、串口控制、桌面端演示 UI、固件执行层都已就位。
-- 默认演示入口是 `scripts/pointer_desktop_app.py`，它会打开工作台启动器；调试入口保留 `scripts/pointer_vision_app.py` 和 `scripts/pointer_serial_cli.py`。
+- 默认演示入口是 `scripts/pointer_desktop_app.py`；调试入口保留 `scripts/pointer_vision_app.py` 和 `scripts/pointer_serial_cli.py`。
 - Windows 侧原型实机链路已经跑通，当前验证环境为“手机摄像头 + CH340 临时供电 SG90”。
-- 当前主要剩余工作不是功能补齐，而是硬件形态收尾，包括独立 5V 供电、独立固定摄像头和更稳妥的参数标定。
+- 当前硬件方案为 `Blue Pill + SG90 + 蜂鸣器 + 红/绿 LED`；提示硬件、镜像角度方向和实时语音仍需要 Windows 侧实机复测。
+- 当前主要剩余工作不是功能补齐，而是硬件形态收尾，包括独立 5V 供电、独立固定摄像头、状态提示硬件验证和更稳妥的参数标定。
 
 ## Windows 快速开始
 
@@ -34,25 +35,28 @@ uv run pio run --project-dir firmware -t upload
 串口联调：
 
 ```bash
-uv run python scripts/pointer_serial_cli.py --port COM5 ping
-uv run python scripts/pointer_serial_cli.py --port COM5 status
-uv run python scripts/pointer_serial_cli.py --port COM5 center
-uv run python scripts/pointer_serial_cli.py --port COM5 angle 120
+uv run python scripts/pointer_serial_cli.py --port COM4 ping
+uv run python scripts/pointer_serial_cli.py --port COM4 status
+uv run python scripts/pointer_serial_cli.py --port COM4 center
+uv run python scripts/pointer_serial_cli.py --port COM4 angle 120
+uv run python scripts/pointer_serial_cli.py --port COM4 state lock
 ```
+
+桌面端下拉框默认显示 `COM4`，但未显式传 `--port COMx` 或 `--auto-connect` 时不会启动即连接串口。命令行串口工具仍默认使用 `COM4`。
 
 启动桌面端工作台：
 
 ```bash
-uv run python scripts/pointer_desktop_app.py --port COM4 --camera 0 --camera-backend msmf --model yolov8n.pt
+uv run python scripts/pointer_desktop_app.py --camera 0 --camera-backend msmf --model yolov8n.pt
 ```
 
 桌面端当前交互约定：
 
-- 启动后先进入工作台主页，`Live Control`、`Voice Assistant`、`Target Report`、`Data Analysis` 都是独立窗口入口。
+- 启动后进入一体化工作台，侧边栏可切换 `Live Control`、`AI 实时对话`、`目标报告`、`Data Analysis` 和 `Activity`。
 - `Live Control` 持续提示下一步推荐操作，不适合当前状态的按钮会自动禁用。
 - 失败操作会弹出短暂错误提示，详细记录保留在 `Activity`。
-- `Target Report` 独立窗口可在目标锁定后生成 `reports/YYYYMMDD_HHMMSS_target_report.pdf` 并展示分析内容。
-- `Voice Assistant` 独立窗口可配置 ElevenLabs STT、LLM 温度、TTS 音色/速度，并从桌面端每 5 秒采样当前画面作为上下文。
+- `目标报告` 可在目标锁定后生成中文 `reports/YYYYMMDD_HHMMSS_target_report.pdf`，内容包含环境、穿着、姿态、活动和不确定性。
+- `AI 实时对话` 由 LiveKit worker 接入实时房间，不保存语音文件；内部使用 `Silero VAD -> OpenAI STT -> OpenAI LLM -> ElevenLabs TTS` pipeline，方便定制音色；界面包含用户麦克风静音、波形状态和字幕滚动区。
 
 云端报告和语音助手需要在仓库根目录 `.env` 中填写：
 
@@ -71,7 +75,7 @@ LIVEKIT_API_SECRET=
 视觉调试入口：
 
 ```bash
-uv run python scripts/pointer_vision_app.py --port COM5 --camera 0 --camera-backend msmf --model yolov8n.pt --verbose
+uv run python scripts/pointer_vision_app.py --port COM4 --camera 0 --camera-backend msmf --model yolov8n.pt --verbose
 ```
 
 列出摄像头：
@@ -92,15 +96,13 @@ uv run pio test --project-dir firmware -e native
 - `targetpointer/`：上位机应用包，包含运行时、视觉、串口、报告、语音和 PySide UI。
 - `scripts/`：Windows 优先的薄入口脚本和兼容导入层。
 - `firmware/`：Blue Pill 固件、协议解析和 PlatformIO 配置。
-- `docs/`：产品、需求、架构、协议和硬件调试文档。
-- `hardware/`：BOM、引脚图、供电与结构说明。
+- `docs/`：产品概述、协议、硬件接线验证和调试记录。
 - `tests/`：上位机逻辑与工具测试。
 
 ## 文档入口
 
 - [docs/README.md](docs/README.md)
 - [docs/项目概述.md](docs/项目概述.md)
-- [docs/需求说明.md](docs/需求说明.md)
-- [docs/架构设计.md](docs/架构设计.md)
 - [docs/接口与协议.md](docs/接口与协议.md)
+- [docs/硬件接线与验证.md](docs/硬件接线与验证.md)
 - [手工调试文档.md](手工调试文档.md)
